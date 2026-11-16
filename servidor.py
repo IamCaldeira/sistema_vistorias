@@ -1,207 +1,298 @@
 """
 Levantamento da Frota Municipal - Prefeitura de Caratinga
-VERSÃO 03 - Cadastro completo
+Servidor local (painel no PC).
 
-Novidades:
-  - todos os campos do cadastro patrimonial (patrimônio, tipo, ano, chassi, renavam...);
-  - identificação única do veículo: a placa ou, se não tiver, "PAT" + nº de patrimônio;
-  - editar e excluir veículos;
-  - busca por placa, patrimônio, modelo ou secretaria.
-
-Uso: python servidor.py   e abra http://localhost:8000 no navegador
+Uso:        python servidor.py
 """
+import json
+import mimetypes
 import re
 import sqlite3
+import threading
+import time
+import traceback
+import unicodedata
+import webbrowser
+from contextlib import contextmanager
 from datetime import datetime
-from html import escape
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-PORTA = 8000
-DADOS = Path(__file__).resolve().parent / "dados"
+RAIZ = Path(__file__).resolve().parent
+WEB = RAIZ / "web"
+DADOS = RAIZ / "dados"
 DB_PATH = DADOS / "frota.db"
+PORTA_HTTP = 8000
+LIMITE_UPLOAD = 60 * 1024 * 1024
 
+
+# ------------------------------------------------------------- definições ----
 TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ônibus",
          "Ambulância", "Caminhão", "Motocicleta", "Trator", "Retroescavadeira",
          "Motoniveladora", "Pá-carregadeira", "Escavadeira", "Rolo compactador",
          "Implemento / Reboque", "Outro"]
-# (coluna no banco, rótulo na tela)
-CAMPOS = [("patrimonio", "Nº de patrimônio"), ("placa", "Placa"), ("tipo", "Tipo"),
-          ("marca_modelo", "Marca / Modelo"), ("ano", "Ano"), ("chassi", "Chassi / Nº de série"),
-          ("renavam", "Renavam"), ("secretaria", "Secretaria"), ("local_cadastro", "Local"),
-          ("responsavel", "Responsável / Motorista"), ("situacao_cadastro", "Situação no cadastro")]
-NA_LISTA = ["chave", "patrimonio", "tipo", "marca_modelo", "ano", "secretaria"]
+CAD = ["patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi", "renavam",
+       "secretaria", "local_cadastro", "responsavel", "situacao_cadastro"]
+
+# ---------------------------------------------------------------- utilidades --
+def agora():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-class ErroCadastro(Exception):
-    pass
+def norm(txt):
+    txt = unicodedata.normalize("NFKD", str(txt or ""))
+    txt = "".join(c for c in txt if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", txt.lower())
 
 
-def conectar():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row   # permite usar linha["placa"]
-    return c
-
-
-def iniciar_banco():
-    DADOS.mkdir(exist_ok=True)
-    with conectar() as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS veiculos(
-                       id INTEGER PRIMARY KEY, chave TEXT NOT NULL UNIQUE,
-                       patrimonio TEXT, placa TEXT, tipo TEXT, marca_modelo TEXT, ano TEXT,
-                       chassi TEXT, renavam TEXT, secretaria TEXT, local_cadastro TEXT,
-                       responsavel TEXT, situacao_cadastro TEXT, criado_em TEXT)""")
-
-
-def limpar(txt):
-    """Só letras maiúsculas e números: 'abc-1d23' vira 'ABC1D23'."""
-    return re.sub(r"[^A-Z0-9]", "", str(txt or "").upper())
+def limpar_chave(txt):
+    return re.sub(r"[^A-Z0-9]", "", str(txt or "").upper())[:20]
 
 
 def calcular_chave(placa, patrimonio):
-    p = limpar(placa)
-    if p in ("SEMPLACA", "SP", "NA"):
+    p = limpar_chave(placa)
+    if p in ("", "SEMPLACA", "SP", "NA", "NAO", "NT", "SPLACA"):
         p = ""
     if p:
         return p
-    pat = limpar(patrimonio)
+    pat = limpar_chave(patrimonio)
     return "PAT" + pat if pat else ""
 
 
-def salvar(dados, vid=None):
-    """Cadastra (vid=None) ou atualiza um veículo. Devolve a chave."""
-    chave = calcular_chave(dados.get("placa"), dados.get("patrimonio"))
-    if not chave:
-        raise ErroCadastro("Informe a placa ou o número de patrimônio.")
-    with conectar() as c:
-        repetido = c.execute("SELECT id FROM veiculos WHERE chave=? AND id<>?", (chave, vid or 0)).fetchone()
-        if repetido:
-            raise ErroCadastro(f"Já existe um veículo com a identificação {chave}.")
-        valores = [dados.get(k, "").strip() for k, _ in CAMPOS]
-        if vid is None:
-            c.execute(f"INSERT INTO veiculos(chave, criado_em, {', '.join(k for k, _ in CAMPOS)}) "
-                      f"VALUES(?, ?, {', '.join('?' for _ in CAMPOS)})",
-                      [chave, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), *valores])
-        else:
-            c.execute(f"UPDATE veiculos SET chave=?, {', '.join(k + '=?' for k, _ in CAMPOS)} WHERE id=?",
-                      [chave, *valores, vid])
-    return chave
+def txt(v):
+    return "" if v is None else str(v).strip()
 
 
-# ------------------------------------------------------------------ páginas --
-def pagina(titulo, conteudo):
-    return f"""<!doctype html>
-<html lang="pt-br">
-<head><meta charset="utf-8"><title>{escape(titulo)} - Frota Municipal</title></head>
-<body>
-<h1>Levantamento da Frota Municipal</h1>
-<p>Prefeitura Municipal de Caratinga - Departamento de Patrimônio</p>
-<hr>
-{conteudo}
-</body>
-</html>"""
+@contextmanager
+def conexao():
+    c = sqlite3.connect(DB_PATH, timeout=20)
+    c.row_factory = sqlite3.Row
+    try:
+        yield c
+        c.commit()
+    finally:
+        c.close()
 
 
-def formulario(acao, v=None, botao="Salvar"):
-    v = v or {}
-    html = f'<form method="post" action="{acao}">\n'
-    for k, rotulo in CAMPOS:
-        valor = escape(v[k] or "") if k in v.keys() else ""
-        if k == "tipo":
-            opcoes = "".join(f"<option {'selected' if t == valor else ''}>{escape(t)}</option>" for t in [""] + TIPOS)
-            html += f'<p>{rotulo}: <select name="tipo">{opcoes}</select></p>\n'
-        else:
-            html += f'<p>{rotulo}: <input name="{k}" value="{valor}"></p>\n'
-    return html + f"<p><button>{botao}</button></p>\n</form>"
+class RotaErro(Exception):
+    def __init__(self, msg, codigo=400):
+        super().__init__(msg)
+        self.codigo = codigo
 
 
-def pagina_lista(busca="", erro="", aviso=""):
-    with conectar() as c:
-        todos = c.execute("SELECT * FROM veiculos ORDER BY chave").fetchall()
-    b = busca.lower()
-    veiculos = [v for v in todos if not b or b in " ".join(str(v[k] or "") for k in
-                                                             ("chave", "patrimonio", "placa", "marca_modelo", "secretaria")).lower()]
-    linhas = "".join(
-        "<tr>" + "".join(f"<td>{escape(v[k] or '')}</td>" for k in NA_LISTA)
-        + f'<td><a href="/editar?id={v["id"]}">editar</a></td></tr>\n' for v in veiculos)
-    if not veiculos:
-        linhas = f'<tr><td colspan="{len(NA_LISTA) + 1}">Nenhum veículo encontrado.</td></tr>'
-    conteudo = f"""
-<p><b>{escape(erro)}</b> {escape(aviso)}</p>
-<form method="get" action="/">Buscar: <input name="q" value="{escape(busca)}"> <button>Buscar</button> <a href="/">limpar</a></form>
-<h2>Veículos e máquinas ({len(veiculos)} de {len(todos)})</h2>
-<table border="1">
-<tr><th>Identificação</th><th>Patrimônio</th><th>Tipo</th><th>Marca / Modelo</th><th>Ano</th><th>Secretaria</th><th></th></tr>
-{linhas}</table>
-<h2>Novo veículo / máquina</h2>
-{formulario("/novo", botao="Cadastrar")}"""
-    return pagina("Veículos", conteudo)
+def iniciar_banco():
+    DADOS.mkdir(parents=True, exist_ok=True)
+    with conexao() as c:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS veiculos(
+            id INTEGER PRIMARY KEY, chave TEXT NOT NULL UNIQUE,
+            patrimonio TEXT, placa TEXT, tipo TEXT, marca_modelo TEXT, ano TEXT,
+            chassi TEXT, renavam TEXT, secretaria TEXT, local_cadastro TEXT,
+            responsavel TEXT, situacao_cadastro TEXT,
+            criado_em TEXT);
+        """)
 
 
-def pagina_editar(vid, erro=""):
-    with conectar() as c:
-        v = c.execute("SELECT * FROM veiculos WHERE id=?", (vid,)).fetchone()
+# ------------------------------------------------------------- regras de dados --
+def veiculo_dict(c, v, completo=False):
+    return dict(v)
+
+
+def achar(c, vid):
+    v = c.execute("SELECT * FROM veiculos WHERE id=?", (vid,)).fetchone()
     if not v:
-        return pagina_lista(erro="Veículo não encontrado.")
-    conteudo = f"""
-<p><a href="/">voltar para a lista</a></p>
-<h2>Editar {escape(v["chave"])}</h2>
-<p><b>{escape(erro)}</b></p>
-{formulario(f"/salvar?id={vid}", v)}
-<form method="post" action="/excluir?id={vid}" onsubmit="return confirm('Excluir este veículo?')">
-  <button>Excluir veículo</button>
-</form>"""
-    return pagina("Editar", conteudo)
+        raise RotaErro("Veículo não encontrado", 404)
+    return v
 
 
-# ----------------------------------------------------------------- servidor --
+def gravar_cadastro(c, v, dados):
+    """Atualiza campos do cadastro (a identificação muda se a placa mudar)."""
+    novos = {k: txt(dados[k]) for k in CAD if k in dados}
+    placa = novos.get("placa", v["placa"])
+    pat = novos.get("patrimonio", v["patrimonio"])
+    chave = calcular_chave(placa, pat)
+    if not chave:
+        raise RotaErro("Informe a placa ou o número de patrimônio.")
+    if chave != v["chave"]:
+        if c.execute("SELECT 1 FROM veiculos WHERE chave=? AND id<>?", (chave, v["id"])).fetchone():
+            raise RotaErro(f"Já existe outro veículo com a identificação {chave}.")
+        novos["chave"] = chave
+    if novos:
+        sets = ", ".join(f"{k}=?" for k in novos)
+        c.execute(f"UPDATE veiculos SET {sets} WHERE id=?", [*novos.values(), v["id"]])
+
+
+# -------------------------------------------------------------------- servidor --
 class Handler(BaseHTTPRequestHandler):
-    def responder(self, html, codigo=200):
-        corpo = html.encode("utf-8")
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    # ---- respostas
+    def enviar(self, corpo, tipo, codigo=200, extra=None):
         self.send_response(codigo)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", tipo)
         self.send_header("Content-Length", str(len(corpo)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(corpo)
 
-    def ir_para(self, endereco):
-        self.send_response(303)
-        self.send_header("Location", endereco)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+    def json(self, dados, codigo=200, extra=None):
+        self.enviar(json.dumps(dados, ensure_ascii=False).encode("utf-8"),
+                    "application/json; charset=utf-8", codigo, extra)
 
+    def arquivo(self, caminho, nome_download=None, inline_nome=None, extra=None, tipo=None):
+        caminho = Path(caminho)
+        if not caminho.is_file():
+            raise RotaErro("Arquivo não encontrado", 404)
+        ext = caminho.suffix.lower()
+        tipos = {".woff2": "font/woff2", ".css": "text/css; charset=utf-8",
+                 ".js": "application/javascript; charset=utf-8",
+                 ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml",
+                 ".png": "image/png", ".jpg": "image/jpeg", ".pdf": "application/pdf"}
+        tipo = tipo or tipos.get(ext) or mimetypes.guess_type(str(caminho))[0] or "application/octet-stream"
+        cab = {"Cache-Control": "no-cache" if ext in (".html", ".js", ".css") else "max-age=600"}
+        cab.update(extra or {})
+        if nome_download:
+            cab["Content-Disposition"] = f'attachment; filename="{nome_download}"'
+        elif inline_nome:
+            cab["Content-Disposition"] = f'inline; filename="{inline_nome}"'
+        self.enviar(caminho.read_bytes(), tipo, 200, cab)
+
+    def corpo_json(self):
+        try:
+            return json.loads(self.corpo.decode("utf-8") or "{}")
+        except ValueError:
+            raise RotaErro("Dados inválidos.")
+
+    # ---- despacho
     def do_GET(self):
-        url = urlparse(self.path)
-        q = parse_qs(url.query)
-        if url.path == "/":
-            return self.responder(pagina_lista(q.get("q", [""])[0], aviso=q.get("aviso", [""])[0]))
-        if url.path == "/editar":
-            return self.responder(pagina_editar(int(q.get("id", ["0"])[0])))
-        self.responder(pagina("Erro", "<p>Página não encontrada.</p>"), 404)
+        self.despachar("GET")
 
     def do_POST(self):
-        url = urlparse(self.path)
-        vid = int(parse_qs(url.query).get("id", ["0"])[0])
-        tamanho = int(self.headers.get("Content-Length") or 0)
-        form = {k: v[0] for k, v in parse_qs(self.rfile.read(tamanho).decode("utf-8"), keep_blank_values=True).items()}
+        self.despachar("POST")
+
+    def despachar(self, metodo):
         try:
-            if url.path == "/novo":
-                chave = salvar(form)
-                return self.ir_para("/?aviso=" + quote(f"{chave} cadastrado."))
-            if url.path == "/salvar":
-                chave = salvar(form, vid)
-                return self.ir_para("/?aviso=" + quote(f"{chave} atualizado."))
-            if url.path == "/excluir":
-                with conectar() as c:
-                    c.execute("DELETE FROM veiculos WHERE id=?", (vid,))
-                return self.ir_para("/?aviso=" + quote("Veículo excluído."))
-        except ErroCadastro as e:
-            return self.responder(pagina_editar(vid, str(e)) if vid else pagina_lista(erro=str(e)))
-        self.responder(pagina("Erro", "<p>Página não encontrada.</p>"), 404)
+            url = urlparse(self.path)
+            self.caminho = unquote(url.path)
+            self.q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            self.corpo = b""
+            if metodo == "POST":
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > LIMITE_UPLOAD:
+                    raise RotaErro("Arquivo grande demais.", 413)
+                self.corpo = self.rfile.read(n)
+            (self.rota_get if metodo == "GET" else self.rota_post)()
+        except RotaErro as e:
+            self.json({"ok": False, "erro": str(e)}, e.codigo)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            self.json({"ok": False, "erro": f"Erro interno: {e}"}, 500)
+
+    # ---- GET
+    def rota_get(self):
+        p = self.caminho
+        if p == "/":
+            return self.arquivo(WEB / "painel.html")
+        if p.startswith("/web/"):
+            alvo = (WEB / p[5:]).resolve()
+            if WEB.resolve() not in alvo.parents:
+                raise RotaErro("Não permitido", 403)
+            return self.arquivo(alvo)
+        if p == "/api/config":
+            return self.json(self.config())
+        if p == "/api/veiculos":
+            return self.json({"ok": True, "veiculos": self.listar()})
+        m = re.fullmatch(r"/api/veiculos/(\d+)", p)
+        if m:
+            with conexao() as c:
+                return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, int(m[1])), True)})
+        raise RotaErro("Rota não encontrada", 404)
+
+    def config(self):
+        return {"ok": True, "tipos": TIPOS}
+
+    def listar(self):
+        q = norm(self.q.get("q", ""))
+        with conexao() as c:
+            vs = [veiculo_dict(c, v) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
+        out = []
+        for v in vs:
+            if q and q not in norm(" ".join(txt(v[k]) for k in
+                                            ("chave", "patrimonio", "placa", "marca_modelo", "secretaria", "tipo"))):
+                continue
+            out.append(v)
+        return out
+
+    # ---- POST
+    def rota_post(self):
+        p = self.caminho
+        if p == "/api/veiculos":
+            return self.criar_veiculo()
+        m = re.fullmatch(r"/api/veiculos/(\d+)/(\w+)", p)
+        if m:
+            return self.acao_veiculo(int(m[1]), m[2])
+        raise RotaErro("Rota não encontrada", 404)
+
+    # ---- veículos
+    def criar_veiculo(self):
+        d = self.corpo_json()
+        chave = calcular_chave(d.get("placa"), d.get("patrimonio"))
+        if not chave:
+            raise RotaErro("Informe a placa ou o número de patrimônio.")
+        campos = {k: txt(d[k]) for k in CAD if txt(d.get(k))}
+        with conexao() as c:
+            if c.execute("SELECT 1 FROM veiculos WHERE chave=?", (chave,)).fetchone():
+                raise RotaErro(f"Já existe um veículo com a identificação {chave}.")
+            cols = ["chave", "criado_em", *campos]
+            cur = c.execute(f"INSERT INTO veiculos({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
+                            [chave, agora(), *campos.values()])
+            vid = cur.lastrowid
+        self.json({"ok": True, "id": vid, "chave": chave})
+
+    def acao_veiculo(self, vid, acao):
+        d = self.corpo_json() if self.corpo else {}
+        with conexao() as c:
+            v = achar(c, vid)
+            if acao == "salvar":
+                gravar_cadastro(c, v, d)
+            elif acao == "excluir":
+                c.execute("DELETE FROM veiculos WHERE id=?", (vid,))
+                return self.json({"ok": True})
+            else:
+                raise RotaErro("Ação inválida.", 404)
+            return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
+
+
+class Servidor(ThreadingHTTPServer):
+    daemon_threads = True
+
+
+def principal():
+    iniciar_banco()
+    print("=" * 62)
+    print("  LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA")
+    print("=" * 62)
+
+    http = Servidor(("0.0.0.0", PORTA_HTTP), Handler)
+    threading.Thread(target=http.serve_forever, daemon=True).start()
+
+    print(f"\n  Painel (neste PC):  http://localhost:{PORTA_HTTP}")
+    print(f"  Dados salvos em:    {DADOS}")
+    print("\n  Deixe esta janela aberta durante o levantamento. Ctrl+C para encerrar.\n")
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{PORTA_HTTP}")).start()
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nEncerrado.")
 
 
 if __name__ == "__main__":
-    iniciar_banco()
-    print(f"Servidor rodando em http://localhost:{PORTA}  (Ctrl+C para parar)")
-    HTTPServer(("0.0.0.0", PORTA), Handler).serve_forever()
+    principal()

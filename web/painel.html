@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Levantamento da Frota - Painel</title>
+<link rel="stylesheet" href="/web/estilo.css">
+</head>
+<body>
+<header class="topo">
+  <img src="/web/brasao.png" alt="Brasão de Caratinga">
+  <div>
+    <h1>Levantamento da Frota Municipal</h1>
+    <small>Secretaria de Administração e Desenvolvimento Econômico · Departamento de Patrimônio</small>
+  </div>
+  <div class="dir">
+  </div>
+</header>
+
+<main>
+  <section class="caixa">
+    <h3><i class="fa-solid fa-list-check"></i> Veículos e máquinas <span id="contagem"></span></h3>
+    <div class="ferr">
+      <input type="text" id="busca" placeholder="Buscar por placa, patrimônio, modelo...">
+      <div class="esp">
+        <button class="btn" id="bNovo"><i class="fa-solid fa-plus"></i> Novo veículo</button>
+      </div>
+    </div>
+    <div class="tab-wrap">
+      <table>
+        <thead><tr><th>Identificação</th><th>Patrimônio</th><th>Tipo</th><th>Marca / Modelo</th><th>Chassi</th><th>Renavam</th><th>Secretaria</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<!-- detalhe -->
+<div class="modal" id="mDet"><div class="jan" id="det"></div></div>
+<!-- novo -->
+<div class="modal" id="mNovo"><div class="jan">
+  <h2><i class="fa-solid fa-plus"></i> Novo veículo / máquina
+    <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
+  <div class="grade" id="formNovo"></div>
+  <div class="erro" id="erroNovo"></div>
+  <div class="acoes"><button class="btn verde" id="salvarNovo"><i class="fa-solid fa-check"></i> Cadastrar</button></div>
+</div></div>
+<script src="/web/comum.js"></script>
+<script>
+let cfg = null, busca = '';
+const CAMPOS = [
+  ['patrimonio', 'Nº de patrimônio'], ['placa', 'Placa'], ['tipo', 'Tipo', 'tipos'],
+  ['ano', 'Ano'], ['marca_modelo', 'Marca / Modelo', null, true], ['chassi', 'Chassi / Nº de série'],
+  ['renavam', 'Renavam'], ['secretaria', 'Secretaria', null, true],
+  ['local_cadastro', 'Local cadastrado'], ['responsavel', 'Responsável / Motorista'],
+  ['situacao_cadastro', 'Situação no cadastro'],
+];
+const fechar = () => { $$('.modal').forEach(m => m.classList.remove('aberto')); carregar(); };
+$$('[data-fechar]').forEach(b => b.onclick = fechar);
+$$('.modal').forEach(m => m.addEventListener('mousedown', e => { if (e.target === m) fechar(); }));
+function tratar(e) { alert(e.message); }
+
+(async () => {
+  cfg = await api('/api/config');
+  await carregar();
+})();
+
+/* ---------- lista de veículos ---------- */
+async function carregar() {
+  try { renderTabela((await api('/api/veiculos?' + new URLSearchParams({q: busca}))).veiculos); }
+  catch (e) { console.warn(e); }
+}
+function renderTabela(vs) {
+  $('#contagem').textContent = `(${vs.length})`;
+  $('#tbody').innerHTML = vs.length ? vs.map(v => `<tr data-id="${v.id}">
+    <td><b>${esc(v.chave)}</b></td><td>${esc(v.patrimonio)}</td><td>${esc(v.tipo)}</td>
+    <td>${esc(v.marca_modelo)}</td><td>${esc(v.chassi)}</td><td>${esc(v.renavam)}</td><td>${esc(v.secretaria)}</td></tr>`).join('')
+    : '<tr><td colspan="7" class="vazio">Nenhum veículo encontrado.</td></tr>';
+  $$('#tbody tr[data-id]').forEach(tr => tr.onclick = () => abrirDetalhe(+tr.dataset.id));
+}
+let deb; $('#busca').oninput = e => { clearTimeout(deb); deb = setTimeout(() => { busca = e.target.value; carregar(); }, 250); };
+
+/* ---------- detalhe do veículo ---------- */
+function campoHtml([k, rot, lista, larg], valor) {
+  const dl = lista === 'tipos' ? `list="dl-tipos"` : '';
+  return `<div class="${larg ? 'larg' : ''}"><label>${rot}</label><input type="text" data-k="${k}" ${dl} value="${esc(valor)}"></div>`;
+}
+async function abrirDetalhe(id) {
+  try { const j = await api('/api/veiculos/' + id); renderDetalhe(j.veiculo); $('#mDet').classList.add('aberto'); }
+  catch (e) { tratar(e); }
+}
+function renderDetalhe(v) {
+  $('#det').innerHTML = `
+    <h2><i class="fa-solid fa-truck-pickup"></i> ${esc(v.chave)}
+      <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
+    <datalist id="dl-tipos">${cfg.tipos.map(t => `<option value="${esc(t)}">`).join('')}</datalist>
+    <h3><i class="fa-solid fa-id-card"></i> Cadastro patrimonial</h3>
+    <div class="grade">${CAMPOS.map(c => campoHtml(c, v[c[0]])).join('')}</div>
+    <div class="erro" id="erroDet"></div>
+    <div class="acoes">
+      <button class="btn verde" id="dSalvar"><i class="fa-solid fa-floppy-disk"></i> Salvar alterações</button>
+      <span></span>
+      <button class="btn verm" id="dExcluir"><i class="fa-solid fa-trash"></i> Excluir veículo</button>
+    </div>`;
+  $$('#det [data-fechar]').forEach(b => b.onclick = fechar);
+  const id = v.id, erro = t => $('#erroDet').textContent = t || '';
+  $('#dSalvar').onclick = async () => {
+    const d = {}; $$('#det [data-k]').forEach(el => d[el.dataset.k] = el.value);
+    try { const j = await post(`/api/veiculos/${id}/salvar`, d); renderDetalhe(j.veiculo); } catch (e) { erro(e.message); }
+  };
+  $('#dExcluir').onclick = async () => {
+    if (!confirm(`Excluir ${v.chave} do sistema?`)) return;
+    try { await post(`/api/veiculos/${id}/excluir`); fechar(); } catch (e) { tratar(e); }
+  };
+}
+
+/* ---------- novo veículo ---------- */
+$('#bNovo').onclick = () => {
+  $('#formNovo').innerHTML = `<datalist id="dl-tipos">${cfg.tipos.map(t => `<option value="${esc(t)}">`).join('')}</datalist>` +
+    CAMPOS.filter(c => c[0] !== 'situacao_cadastro').map(c => campoHtml(c, '')).join('');
+  $('#erroNovo').textContent = ''; $('#mNovo').classList.add('aberto');
+};
+$('#salvarNovo').onclick = async () => {
+  const d = {}; $$('#formNovo [data-k]').forEach(el => d[el.dataset.k] = el.value);
+  try { await post('/api/veiculos', d); fechar(); } catch (e) { $('#erroNovo').textContent = e.message; }
+};
+
+</script>
+</body>
+</html>

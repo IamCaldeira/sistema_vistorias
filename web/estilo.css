@@ -1,0 +1,5 @@
+/* AINDA SEM ESTILIZAÇÃO. Só o essencial para o sistema funcionar:
+   esconder/mostrar as janelas. */
+.modal{position:fixed;inset:0;display:none;background:#fff;overflow:auto;z-index:40}
+.modal.aberto{display:block}
+img[src$="brasao.png"]{height:64px;width:auto}

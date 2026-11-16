@@ -4,6 +4,8 @@ Servidor local (painel no PC).
 
 Uso:        python servidor.py
 """
+import csv
+import io
 import json
 import mimetypes
 import re
@@ -35,6 +37,32 @@ TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ôni
 CAD = ["patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi", "renavam",
        "secretaria", "local_cadastro", "responsavel", "situacao_cadastro"]
 
+ALIASES = {
+    "patrimonio": ["patrimonio", "npatrimonio", "numpatrimonio", "numeropatrimonio",
+                   "nrpatrimonio", "nopatrimonio", "tombo", "plaqueta", "codigo",
+                   "codigopatrimonio", "patrimonionumero"],
+    "placa": ["placa", "placas"],
+    "tipo": ["tipo", "especie", "categoria", "tipodoveiculo", "tipoveiculo"],
+    "marca_modelo": ["marcamodelo", "marcaemodelo", "veiculo", "descricao",
+                     "modeloveiculo", "descricaodobem"],
+    "_marca": ["marca", "fabricante"],
+    "_modelo": ["modelo"],
+    "ano": ["ano", "anofabricacao", "anomodelo", "anofab", "fabricacao", "anomodfab"],
+    "chassi": ["chassi", "chassis", "chassiserie", "chassinserie", "chassiouserie",
+               "nserie", "numerodeserie", "numeroserie", "serie", "nroserie", "nodeserie",
+               "chassinumeroserie", "numerochassi", "nchassi"],
+    "renavam": ["renavam"],
+    "secretaria": ["secretaria", "orgao", "lotacao", "setor", "departamento",
+                   "unidade", "secretariadestino", "secretariaresponsavel"],
+    "local_cadastro": ["local", "localizacao", "garagem", "endereco", "localatual"],
+    "responsavel": ["responsavel", "motorista", "operador", "condutor", "detentor"],
+    "situacao_cadastro": ["situacao", "situacaocadastro", "status", "condicao",
+                          "estado", "situacaoatual"],
+}
+# Segunda tentativa de reconhecer cabeçalhos: se o nome CONTÉM a palavra-chave
+CONTEM = [("chassi", "chassi"), ("serie", "chassi"), ("renavam", "renavam"),
+          ("patrimonio", "patrimonio"), ("placa", "placa"), ("secretaria", "secretaria"),
+          ("responsavel", "responsavel"), ("motorista", "responsavel")]
 # ---------------------------------------------------------------- utilidades --
 def agora():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -90,7 +118,7 @@ def iniciar_banco():
             patrimonio TEXT, placa TEXT, tipo TEXT, marca_modelo TEXT, ano TEXT,
             chassi TEXT, renavam TEXT, secretaria TEXT, local_cadastro TEXT,
             responsavel TEXT, situacao_cadastro TEXT,
-            criado_em TEXT);
+            origem TEXT DEFAULT 'importado', criado_em TEXT);
         """)
 
 
@@ -121,6 +149,99 @@ def gravar_cadastro(c, v, dados):
     if novos:
         sets = ", ".join(f"{k}=?" for k in novos)
         c.execute(f"UPDATE veiculos SET {sets} WHERE id=?", [*novos.values(), v["id"]])
+
+
+# --------------------------------------------------------------- importação ----
+def ler_planilha(nome, dados):
+    """Retorna lista de listas (linhas) a partir de CSV ou XLSX."""
+    if nome.lower().endswith((".xlsx", ".xlsm")):
+        try:
+            import openpyxl
+        except ImportError:
+            raise RotaErro("Para ler .xlsx instale o openpyxl (pip install openpyxl) "
+                           "ou salve a planilha como CSV.")
+        wb = openpyxl.load_workbook(io.BytesIO(dados), data_only=True, read_only=True)
+        ws = wb.worksheets[0]
+        return [["" if x is None else x for x in row] for row in ws.iter_rows(values_only=True)]
+    try:
+        texto = dados.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        texto = dados.decode("cp1252", errors="replace")
+    primeira = texto.splitlines()[0] if texto.strip() else ""
+    delim = max([";", ",", "\t"], key=primeira.count)
+    return list(csv.reader(io.StringIO(texto), delimiter=delim))
+
+
+def importar(c, nome, dados):
+    linhas = ler_planilha(nome, dados)
+    if len(linhas) < 2:
+        raise RotaErro("A planilha está vazia ou só tem o cabeçalho.")
+    mapa = {}
+    for i, cab in enumerate(linhas[0]):
+        n = norm(cab)
+        for campo, nomes in ALIASES.items():
+            if n in nomes and campo not in mapa:
+                mapa[campo] = i
+                break
+    usadas = set(mapa.values())
+    for i, cab in enumerate(linhas[0]):  # 2ª passada: nome que contém a palavra-chave
+        if i in usadas or not txt(cab):
+            continue
+        n = norm(cab)
+        for chave_busca, campo in CONTEM:
+            if chave_busca in n and campo not in mapa:
+                mapa[campo] = i
+                usadas.add(i)
+                break
+    reconhecidas = {txt(linhas[0][i]): campo.lstrip("_") for campo, i in mapa.items()}
+    ignoradas = [txt(cab) for i, cab in enumerate(linhas[0]) if i not in usadas and txt(cab)]
+    if not any(k in mapa for k in ("placa", "patrimonio")):
+        raise RotaErro("Não encontrei coluna de Placa nem de Patrimônio no cabeçalho. "
+                       "Baixe o modelo de planilha para ver os nomes esperados.")
+    ins = atu = com_chassi = com_renavam = 0
+    erros = []
+    for n, lin in enumerate(linhas[1:], start=2):
+        if not any(txt(x) for x in lin):
+            continue
+        reg = {k: txt(lin[i]) if i < len(lin) else "" for k, i in mapa.items()}
+        for k, val in reg.items():  # números vindos do Excel ("2020.0" -> "2020")
+            if re.fullmatch(r"\d+\.0", val):
+                reg[k] = val[:-2]
+        if reg.get("renavam", "").isdigit() and len(reg["renavam"]) < 11:
+            reg["renavam"] = reg["renavam"].zfill(11)  # Excel come o zero à esquerda
+        com_chassi += bool(reg.get("chassi"))
+        com_renavam += bool(reg.get("renavam"))
+        if not reg.get("marca_modelo"):
+            reg["marca_modelo"] = " ".join(x for x in (reg.get("_marca"), reg.get("_modelo")) if x)
+        if reg.get("ano", "").endswith(".0"):
+            reg["ano"] = reg["ano"][:-2]
+        chave = calcular_chave(reg.get("placa"), reg.get("patrimonio"))
+        if not chave:
+            erros.append(f"Linha {n}: sem placa e sem patrimônio.")
+            continue
+        existente = c.execute("SELECT * FROM veiculos WHERE chave=?", (chave,)).fetchone()
+        campos = {k: reg[k] for k in CAD if reg.get(k)}
+        if existente:
+            if campos:
+                sets = ", ".join(f"{k}=?" for k in campos)
+                c.execute(f"UPDATE veiculos SET {sets} WHERE id=?", [*campos.values(), existente["id"]])
+            atu += 1
+        else:
+            cols = ["chave", "criado_em", "origem", *campos]
+            c.execute(f"INSERT INTO veiculos({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
+                      [chave, agora(), "importado", *campos.values()])
+            ins += 1
+    return {"inseridos": ins, "atualizados": atu, "erros": erros[:30], "n_erros": len(erros),
+            "com_chassi": com_chassi, "com_renavam": com_renavam,
+            "reconhecidas": reconhecidas, "ignoradas": ignoradas}
+
+
+def csv_bytes(cabecalho, linhas):
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(cabecalho)
+    w.writerows(linhas)
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
 # -------------------------------------------------------------------- servidor --
@@ -213,6 +334,13 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             with conexao() as c:
                 return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, int(m[1])), True)})
+        if p == "/api/modelo.csv":
+            corpo = csv_bytes(["Patrimonio", "Placa", "Tipo", "Marca/Modelo", "Ano", "Chassi/Serie",
+                               "Renavam", "Secretaria", "Local", "Responsavel", "Situacao"], [])
+            return self.enviar(corpo, "text/csv; charset=utf-8", 200,
+                               {"Content-Disposition": 'attachment; filename="modelo_importacao.csv"'})
+        if p == "/api/exportar.csv":
+            return self.exportar()
         raise RotaErro("Rota não encontrada", 404)
 
     def config(self):
@@ -230,9 +358,27 @@ class Handler(BaseHTTPRequestHandler):
             out.append(v)
         return out
 
+    def exportar(self):
+        with conexao() as c:
+            vs = [veiculo_dict(c, v) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
+        cab = ["identificacao", "patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi",
+               "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro", "origem"]
+        linhas = []
+        for v in vs:
+            linhas.append([v["chave"], v["patrimonio"], v["placa"], v["tipo"], v["marca_modelo"],
+                           v["ano"], v["chassi"], v["renavam"], v["secretaria"], v["local_cadastro"],
+                           v["responsavel"], v["situacao_cadastro"], v["origem"]])
+        nome = "frota_" + datetime.now().strftime("%Y%m%d_%H%M") + ".csv"
+        self.enviar(csv_bytes(cab, linhas), "text/csv; charset=utf-8", 200,
+                    {"Content-Disposition": f'attachment; filename="{nome}"'})
+
     # ---- POST
     def rota_post(self):
         p = self.caminho
+        if p == "/api/importar":
+            nome = self.q.get("nome", "planilha.csv")
+            with conexao() as c:
+                return self.json({"ok": True, **importar(c, nome, self.corpo)})
         if p == "/api/veiculos":
             return self.criar_veiculo()
         m = re.fullmatch(r"/api/veiculos/(\d+)/(\w+)", p)
@@ -243,6 +389,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- veículos
     def criar_veiculo(self):
         d = self.corpo_json()
+        origem = "painel"
         chave = calcular_chave(d.get("placa"), d.get("patrimonio"))
         if not chave:
             raise RotaErro("Informe a placa ou o número de patrimônio.")
@@ -250,9 +397,9 @@ class Handler(BaseHTTPRequestHandler):
         with conexao() as c:
             if c.execute("SELECT 1 FROM veiculos WHERE chave=?", (chave,)).fetchone():
                 raise RotaErro(f"Já existe um veículo com a identificação {chave}.")
-            cols = ["chave", "criado_em", *campos]
+            cols = ["chave", "criado_em", "origem", *campos]
             cur = c.execute(f"INSERT INTO veiculos({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
-                            [chave, agora(), *campos.values()])
+                            [chave, agora(), origem, *campos.values()])
             vid = cur.lastrowid
         self.json({"ok": True, "id": vid, "chave": chave})
 

@@ -24,6 +24,8 @@
       <input type="text" id="busca" placeholder="Buscar por placa, patrimônio, modelo...">
       <div class="esp">
         <button class="btn" id="bNovo"><i class="fa-solid fa-plus"></i> Novo veículo</button>
+        <button class="btn sec" id="bImp"><i class="fa-solid fa-file-import"></i> Importar planilha</button>
+        <a class="btn sec" href="/api/exportar.csv"><i class="fa-solid fa-file-export"></i> Exportar CSV</a>
       </div>
     </div>
     <div class="tab-wrap">
@@ -44,6 +46,18 @@
   <div class="grade" id="formNovo"></div>
   <div class="erro" id="erroNovo"></div>
   <div class="acoes"><button class="btn verde" id="salvarNovo"><i class="fa-solid fa-check"></i> Cadastrar</button></div>
+</div></div>
+<!-- importar -->
+<div class="modal" id="mImp"><div class="jan peq">
+  <h2><i class="fa-solid fa-file-import"></i> Importar planilha
+    <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
+  <p>Aceita <b>CSV</b> (separado por ; ou ,) e <b>Excel (.xlsx)</b>. A primeira linha deve ser o cabeçalho
+  (Placa, Patrimônio, Tipo, Marca/Modelo, Ano, Chassi, Renavam, Secretaria, Local, Responsável, Situação).
+  Veículos já existentes (mesma placa ou patrimônio) são atualizados.</p>
+  <p><a href="/api/modelo.csv"><i class="fa-solid fa-download"></i> Baixar modelo de planilha</a></p>
+  <input type="file" id="arqImp" accept=".csv,.xlsx,.xlsm,.txt">
+  <div class="erro" id="resImp"></div>
+  <div class="acoes"><button class="btn" id="goImp"><i class="fa-solid fa-upload"></i> Importar</button></div>
 </div></div>
 <script src="/web/comum.js"></script>
 <script>
@@ -121,8 +135,25 @@ $('#bNovo').onclick = () => {
   $('#erroNovo').textContent = ''; $('#mNovo').classList.add('aberto');
 };
 $('#salvarNovo').onclick = async () => {
-  const d = {}; $$('#formNovo [data-k]').forEach(el => d[el.dataset.k] = el.value);
+  const d = {origem: 'painel'}; $$('#formNovo [data-k]').forEach(el => d[el.dataset.k] = el.value);
   try { await post('/api/veiculos', d); fechar(); } catch (e) { $('#erroNovo').textContent = e.message; }
+};
+
+/* ---------- importar ---------- */
+$('#bImp').onclick = () => { $('#resImp').textContent = ''; $('#arqImp').value = ''; $('#mImp').classList.add('aberto'); };
+$('#goImp').onclick = async () => {
+  const f = $('#arqImp').files[0]; if (!f) { $('#resImp').textContent = 'Escolha um arquivo.'; return; }
+  $('#resImp').textContent = 'Importando...';
+  try {
+    const j = await api('/api/importar?nome=' + encodeURIComponent(f.name), {method: 'POST', body: f});
+    const rec = Object.entries(j.reconhecidas).map(([c, k]) => `${esc(c)} → ${esc(k)}`).join(' · ');
+    $('#resImp').innerHTML = `<b>${j.inseridos}</b> veículo(s) novo(s), <b>${j.atualizados}</b> atualizado(s)<br>
+      Com chassi: <b>${j.com_chassi}</b> · Com renavam: <b>${j.com_renavam}</b><br>
+      <small>Colunas reconhecidas: ${rec}</small>` +
+      (j.ignoradas.length ? `<br><span>Colunas ignoradas (nome não reconhecido): ${j.ignoradas.map(esc).join(', ')}</span>` : '') +
+      (j.n_erros ? `<br><span>${j.n_erros} linha(s) ignorada(s):<br>${j.erros.map(esc).join('<br>')}</span>` : '');
+    carregar();
+  } catch (e) { $('#resImp').innerHTML = `<span>${esc(e.message)}</span>`; }
 };
 
 </script>

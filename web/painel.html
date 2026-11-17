@@ -14,6 +14,7 @@
     <small>Secretaria de Administração e Desenvolvimento Econômico · Departamento de Patrimônio</small>
   </div>
   <div class="dir">
+    <a class="btn peq" href="/m" target="_blank" title="Abre a tela de vistoria (a mesma do celular)"><i class="fa-solid fa-clipboard-check"></i> Vistoriar</a>
   </div>
 </header>
 
@@ -22,6 +23,8 @@
     <h3><i class="fa-solid fa-list-check"></i> Veículos e máquinas <span id="contagem"></span></h3>
     <div class="ferr">
       <input type="text" id="busca" placeholder="Buscar por placa, patrimônio, modelo...">
+      <select id="fstatus"><option value="todos">Todos</option><option value="pendente">Pendentes</option>
+        <option value="em_andamento">Em andamento</option><option value="concluido">Concluídos</option></select>
       <div class="esp">
         <button class="btn" id="bNovo"><i class="fa-solid fa-plus"></i> Novo veículo</button>
         <button class="btn sec" id="bImp"><i class="fa-solid fa-file-import"></i> Importar planilha</button>
@@ -30,7 +33,8 @@
     </div>
     <div class="tab-wrap">
       <table>
-        <thead><tr><th>Identificação</th><th>Patrimônio</th><th>Tipo</th><th>Marca / Modelo</th><th>Chassi</th><th>Renavam</th><th>Secretaria</th></tr></thead>
+        <thead><tr><th>Identificação</th><th>Patrimônio</th><th>Tipo</th><th>Marca / Modelo</th><th>Chassi</th><th>Renavam</th><th>Secretaria</th>
+          <th>Status</th><th>Situação</th><th>Vistoriador</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
@@ -53,7 +57,7 @@
     <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
   <p>Aceita <b>CSV</b> (separado por ; ou ,) e <b>Excel (.xlsx)</b>. A primeira linha deve ser o cabeçalho
   (Placa, Patrimônio, Tipo, Marca/Modelo, Ano, Chassi, Renavam, Secretaria, Local, Responsável, Situação).
-  Veículos já existentes (mesma placa ou patrimônio) são atualizados.</p>
+  Veículos já existentes (mesma placa ou patrimônio) são atualizados, sem apagar as vistorias.</p>
   <p><a href="/api/modelo.csv"><i class="fa-solid fa-download"></i> Baixar modelo de planilha</a></p>
   <input type="file" id="arqImp" accept=".csv,.xlsx,.xlsm,.txt">
   <div class="erro" id="resImp"></div>
@@ -61,7 +65,7 @@
 </div></div>
 <script src="/web/comum.js"></script>
 <script>
-let cfg = null, busca = '';
+let cfg = null, filtro = 'todos', busca = '';
 const CAMPOS = [
   ['patrimonio', 'Nº de patrimônio'], ['placa', 'Placa'], ['tipo', 'Tipo', 'tipos'],
   ['ano', 'Ano'], ['marca_modelo', 'Marca / Modelo', null, true], ['chassi', 'Chassi / Nº de série'],
@@ -69,6 +73,7 @@ const CAMPOS = [
   ['local_cadastro', 'Local cadastrado'], ['responsavel', 'Responsável / Motorista'],
   ['situacao_cadastro', 'Situação no cadastro'],
 ];
+const modalAberto = () => $$('.modal.aberto').length > 0;
 const fechar = () => { $$('.modal').forEach(m => m.classList.remove('aberto')); carregar(); };
 $$('[data-fechar]').forEach(b => b.onclick = fechar);
 $$('.modal').forEach(m => m.addEventListener('mousedown', e => { if (e.target === m) fechar(); }));
@@ -77,22 +82,26 @@ function tratar(e) { alert(e.message); }
 (async () => {
   cfg = await api('/api/config');
   await carregar();
+  setInterval(() => { if (!modalAberto()) carregar().catch(() => {}); }, 8000);
 })();
 
 /* ---------- lista de veículos ---------- */
 async function carregar() {
-  try { renderTabela((await api('/api/veiculos?' + new URLSearchParams({q: busca}))).veiculos); }
+  try { renderTabela((await api('/api/veiculos?' + new URLSearchParams({q: busca, filtro}))).veiculos); }
   catch (e) { console.warn(e); }
 }
 function renderTabela(vs) {
   $('#contagem').textContent = `(${vs.length})`;
   $('#tbody').innerHTML = vs.length ? vs.map(v => `<tr data-id="${v.id}">
     <td><b>${esc(v.chave)}</b></td><td>${esc(v.patrimonio)}</td><td>${esc(v.tipo)}</td>
-    <td>${esc(v.marca_modelo)}</td><td>${esc(v.chassi)}</td><td>${esc(v.renavam)}</td><td>${esc(v.secretaria)}</td></tr>`).join('')
-    : '<tr><td colspan="7" class="vazio">Nenhum veículo encontrado.</td></tr>';
+    <td>${esc(v.marca_modelo)}</td><td>${esc(v.chassi)}</td><td>${esc(v.renavam)}</td><td>${esc(v.secretaria)}</td><td>${badge(v.status)}</td>
+    <td>${esc(v.situacao)}</td>
+    <td>${esc(v.vistoriador_nome)}</td></tr>`).join('')
+    : '<tr><td colspan="10" class="vazio">Nenhum veículo encontrado.</td></tr>';
   $$('#tbody tr[data-id]').forEach(tr => tr.onclick = () => abrirDetalhe(+tr.dataset.id));
 }
 let deb; $('#busca').oninput = e => { clearTimeout(deb); deb = setTimeout(() => { busca = e.target.value; carregar(); }, 250); };
+$('#fstatus').onchange = e => { filtro = e.target.value; carregar(); };
 
 /* ---------- detalhe do veículo ---------- */
 function campoHtml([k, rot, lista, larg], valor) {
@@ -104,16 +113,30 @@ async function abrirDetalhe(id) {
   catch (e) { tratar(e); }
 }
 function renderDetalhe(v) {
+  const sit = ['', ...cfg.situacoes].map(s => `<option ${s === (v.situacao || '') ? 'selected' : ''}>${esc(s)}</option>`).join('');
   $('#det').innerHTML = `
-    <h2><i class="fa-solid fa-truck-pickup"></i> ${esc(v.chave)}
+    <h2><i class="fa-solid fa-truck-pickup"></i> ${esc(v.chave)} ${badge(v.status)}
       <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
     <datalist id="dl-tipos">${cfg.tipos.map(t => `<option value="${esc(t)}">`).join('')}</datalist>
     <h3><i class="fa-solid fa-id-card"></i> Cadastro patrimonial</h3>
     <div class="grade">${CAMPOS.map(c => campoHtml(c, v[c[0]])).join('')}</div>
+    <h3><i class="fa-solid fa-clipboard-check"></i> Vistoria</h3>
+    <div class="grade">
+      <div><label>Situação aparente</label><select data-k="situacao">${sit}</select></div>
+      <div><label>Odômetro / Horímetro</label><input type="text" data-k="odometro" value="${esc(v.odometro)}"></div>
+      <div class="larg"><label>Local verificado</label><input type="text" data-k="local_visto" value="${esc(v.local_visto)}"></div>
+      <div class="larg"><label>Observações</label><textarea data-k="obs" rows="2">${esc(v.obs)}</textarea></div>
+    </div>
+    <div>
+      <i class="fa-solid fa-user"></i> Vistoriador: <b>${esc(v.vistoriador_nome) || '—'}</b> ${v.vistoriador_matricula ? '(Mat. ' + esc(v.vistoriador_matricula) + ')' : ''}
+      · <i class="fa-regular fa-clock"></i> ${fmtData(v.inicio) || '—'} → ${fmtData(v.fim) || '—'}
+      ${v.origem === 'campo' ? '<br><i class="fa-solid fa-circle-plus a-campo"></i> Cadastrado em campo (não constava na lista do patrimônio)' : ''}
+    </div>
     <div class="erro" id="erroDet"></div>
     <div class="acoes">
       <button class="btn verde" id="dSalvar"><i class="fa-solid fa-floppy-disk"></i> Salvar alterações</button>
       <span></span>
+      <button class="btn sec" id="dReiniciar"><i class="fa-solid fa-rotate-left"></i> Reiniciar vistoria</button>
       <button class="btn verm" id="dExcluir"><i class="fa-solid fa-trash"></i> Excluir veículo</button>
     </div>`;
   $$('#det [data-fechar]').forEach(b => b.onclick = fechar);
@@ -121,6 +144,10 @@ function renderDetalhe(v) {
   $('#dSalvar').onclick = async () => {
     const d = {}; $$('#det [data-k]').forEach(el => d[el.dataset.k] = el.value);
     try { const j = await post(`/api/veiculos/${id}/salvar`, d); renderDetalhe(j.veiculo); } catch (e) { erro(e.message); }
+  };
+  $('#dReiniciar').onclick = async () => {
+    if (!confirm('Apagar os dados da vistoria deste veículo e voltar para "Pendente"?')) return;
+    try { const j = await post(`/api/veiculos/${id}/reiniciar`); renderDetalhe(j.veiculo); } catch (e) { tratar(e); }
   };
   $('#dExcluir').onclick = async () => {
     if (!confirm(`Excluir ${v.chave} do sistema?`)) return;

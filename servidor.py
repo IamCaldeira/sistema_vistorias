@@ -1,6 +1,6 @@
 """
 Levantamento da Frota Municipal - Prefeitura de Caratinga
-Servidor local (painel no PC).
+Servidor local (painel no PC + vistoria no celular).
 
 Uso:        python servidor.py
 """
@@ -30,12 +30,14 @@ LIMITE_UPLOAD = 60 * 1024 * 1024
 
 
 # ------------------------------------------------------------- definições ----
+SITUACOES = ["Em uso", "Parado", "Em oficina", "Inservível / sucata", "Não localizado"]
 TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ônibus",
          "Ambulância", "Caminhão", "Motocicleta", "Trator", "Retroescavadeira",
          "Motoniveladora", "Pá-carregadeira", "Escavadeira", "Rolo compactador",
          "Implemento / Reboque", "Outro"]
 CAD = ["patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi", "renavam",
        "secretaria", "local_cadastro", "responsavel", "situacao_cadastro"]
+VIST = ["situacao", "odometro", "local_visto", "obs"]
 
 ALIASES = {
     "patrimonio": ["patrimonio", "npatrimonio", "numpatrimonio", "numeropatrimonio",
@@ -118,7 +120,10 @@ def iniciar_banco():
             patrimonio TEXT, placa TEXT, tipo TEXT, marca_modelo TEXT, ano TEXT,
             chassi TEXT, renavam TEXT, secretaria TEXT, local_cadastro TEXT,
             responsavel TEXT, situacao_cadastro TEXT,
-            origem TEXT DEFAULT 'importado', criado_em TEXT);
+            origem TEXT DEFAULT 'importado', criado_em TEXT,
+            status TEXT DEFAULT 'pendente', situacao TEXT, odometro TEXT,
+            local_visto TEXT, obs TEXT, vistoriador_nome TEXT,
+            vistoriador_matricula TEXT, inicio TEXT, fim TEXT);
         """)
 
 
@@ -321,6 +326,8 @@ class Handler(BaseHTTPRequestHandler):
         p = self.caminho
         if p == "/":
             return self.arquivo(WEB / "painel.html")
+        if p in ("/m", "/m/"):
+            return self.arquivo(WEB / "celular.html")
         if p.startswith("/web/"):
             alvo = (WEB / p[5:]).resolve()
             if WEB.resolve() not in alvo.parents:
@@ -344,16 +351,18 @@ class Handler(BaseHTTPRequestHandler):
         raise RotaErro("Rota não encontrada", 404)
 
     def config(self):
-        return {"ok": True, "tipos": TIPOS}
+        return {"ok": True, "situacoes": SITUACOES, "tipos": TIPOS}
 
     def listar(self):
-        q = norm(self.q.get("q", ""))
+        q, filtro = norm(self.q.get("q", "")), self.q.get("filtro", "todos")
         with conexao() as c:
             vs = [veiculo_dict(c, v) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
         out = []
         for v in vs:
             if q and q not in norm(" ".join(txt(v[k]) for k in
                                             ("chave", "patrimonio", "placa", "marca_modelo", "secretaria", "tipo"))):
+                continue
+            if filtro in ("pendente", "em_andamento", "concluido") and v["status"] != filtro:
                 continue
             out.append(v)
         return out
@@ -362,12 +371,17 @@ class Handler(BaseHTTPRequestHandler):
         with conexao() as c:
             vs = [veiculo_dict(c, v) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
         cab = ["identificacao", "patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi",
-               "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro", "origem"]
+               "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro",
+               "status", "situacao_aparente", "odometro_horimetro", "local_verificado",
+               "observacoes", "vistoriador", "matricula", "inicio", "fim",
+               "origem"]
         linhas = []
         for v in vs:
             linhas.append([v["chave"], v["patrimonio"], v["placa"], v["tipo"], v["marca_modelo"],
                            v["ano"], v["chassi"], v["renavam"], v["secretaria"], v["local_cadastro"],
-                           v["responsavel"], v["situacao_cadastro"], v["origem"]])
+                           v["responsavel"], v["situacao_cadastro"], v["status"], v["situacao"],
+                           v["odometro"], v["local_visto"], v["obs"], v["vistoriador_nome"],
+                           v["vistoriador_matricula"], v["inicio"], v["fim"], v["origem"]])
         nome = "frota_" + datetime.now().strftime("%Y%m%d_%H%M") + ".csv"
         self.enviar(csv_bytes(cab, linhas), "text/csv; charset=utf-8", 200,
                     {"Content-Disposition": f'attachment; filename="{nome}"'})
@@ -389,7 +403,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- veículos
     def criar_veiculo(self):
         d = self.corpo_json()
-        origem = "painel"
+        origem = "campo" if d.get("origem") == "campo" else "painel"
         chave = calcular_chave(d.get("placa"), d.get("patrimonio"))
         if not chave:
             raise RotaErro("Informe a placa ou o número de patrimônio.")
@@ -405,10 +419,42 @@ class Handler(BaseHTTPRequestHandler):
 
     def acao_veiculo(self, vid, acao):
         d = self.corpo_json() if self.corpo else {}
+        # quem está vistoriando: nome e matrícula digitados no celular
+        u = {"nome": txt(d.get("vistoriador_nome")), "matricula": txt(d.get("vistoriador_matricula"))}
         with conexao() as c:
             v = achar(c, vid)
             if acao == "salvar":
                 gravar_cadastro(c, v, d)
+                sets = {k: txt(d[k]) for k in VIST if k in d}
+                if sets:
+                    c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
+                              [*sets.values(), vid])
+            elif acao == "iniciar":
+                if isinstance(d.get("cadastro"), dict):
+                    gravar_cadastro(c, v, d["cadastro"])
+                    v = achar(c, vid)
+                if not txt(d.get("situacao")):
+                    raise RotaErro("Informe a situação aparente do veículo.")
+                sets = {k: txt(d.get(k)) for k in VIST}
+                sets["status"] = "em_andamento" if v["status"] != "concluido" else v["status"]
+                if u["nome"] and (v["status"] == "pendente" or not v["vistoriador_nome"]):
+                    sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
+                if not v["inicio"]:
+                    sets["inicio"] = agora()
+                c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
+                          [*sets.values(), vid])
+            elif acao == "concluir":
+                if not txt(v["situacao"]):
+                    raise RotaErro("Informe a situação aparente antes de concluir.")
+                sets = {"status": "concluido", "fim": agora()}
+                if not v["vistoriador_nome"] and u["nome"]:
+                    sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
+                c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
+                          [*sets.values(), vid])
+            elif acao == "reiniciar":
+                c.execute("UPDATE veiculos SET status='pendente', situacao=NULL, odometro=NULL, local_visto=NULL, "
+                          "obs=NULL, vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL "
+                          "WHERE id=?", (vid,))
             elif acao == "excluir":
                 c.execute("DELETE FROM veiculos WHERE id=?", (vid,))
                 return self.json({"ok": True})
@@ -431,6 +477,7 @@ def principal():
     threading.Thread(target=http.serve_forever, daemon=True).start()
 
     print(f"\n  Painel (neste PC):  http://localhost:{PORTA_HTTP}")
+    print(f"  Celular:            http://IP-DO-NOTEBOOK:{PORTA_HTTP}/m   (veja o IP com o comando ipconfig)")
     print(f"  Dados salvos em:    {DADOS}")
     print("\n  Deixe esta janela aberta durante o levantamento. Ctrl+C para encerrar.\n")
     threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{PORTA_HTTP}")).start()

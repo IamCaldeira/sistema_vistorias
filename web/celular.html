@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vistoria da Frota</title>
+<link rel="stylesheet" href="/web/estilo.css">
+</head>
+<body class="cel">
+<div class="barra">
+  <img src="/web/brasao.png" alt="">
+  <div class="t">Vistoria da Frota<small id="quem"></small></div>
+  <div class="dir">
+    <button class="btn sec peq" id="trocar" title="Trocar vistoriador"><i class="fa-solid fa-user-pen"></i> Trocar</button>
+  </div>
+</div>
+<div id="app"></div>
+
+<script src="/web/comum.js"></script>
+<script>
+/* =====================================================================
+   Aplicativo do celular: cada ação é enviada na hora para o notebook.
+   (Precisa estar conectado ao hotspot do notebook o tempo todo.)
+   ===================================================================== */
+let vistoriador = null, cfg = null, v = null, filtro = 'pendente', busca = '';
+const app = $('#app');
+const tratar = e => alert(e instanceof TypeError ? 'Sem conexão com o notebook.' : e.message);
+
+/* Quem está vistoriando: nome e matrícula ficam guardados neste celular */
+function telaIdentificacao() {
+  app.innerHTML = `<div class="etapa-titulo">Quem está vistoriando?</div>
+    <label>Nome completo</label><input type="text" id="vNome" value="${esc(vistoriador?.nome)}">
+    <label>Matrícula</label><input type="text" id="vMat" value="${esc(vistoriador?.matricula)}">
+    <div id="msg" class="erro"></div>
+    <button class="btn verde" id="vOk"><i class="fa-solid fa-check"></i> Continuar</button>`;
+  $('#vOk').onclick = () => {
+    const nome = $('#vNome').value.trim(), matricula = $('#vMat').value.trim();
+    if (nome.length < 3 || !matricula) { $('#msg').textContent = 'Informe nome e matrícula.'; return; }
+    vistoriador = {nome, matricula}; localStorage.setItem('vistoriador', JSON.stringify(vistoriador));
+    $('#quem').textContent = `${nome} · Mat. ${matricula}`; telaLista();
+  };
+}
+(async () => {
+  try { vistoriador = JSON.parse(localStorage.getItem('vistoriador')); } catch (e) {}
+  try { cfg = await api('/api/config'); } catch (e) { app.innerHTML = '<div class="aviso verm">Sem conexão com o notebook.</div>'; return; }
+  if (!vistoriador) return telaIdentificacao();
+  $('#quem').textContent = `${vistoriador.nome} · Mat. ${vistoriador.matricula}`;
+  telaLista();
+})();
+$('#trocar').onclick = telaIdentificacao;
+
+/* ---------------- comunicação com o notebook ---------------- */
+const quem = () => ({vistoriador_nome: vistoriador.nome, vistoriador_matricula: vistoriador.matricula});
+const acao = async (nome, dados) => { v = (await post(`/api/veiculos/${v.id}/${nome}`, {...dados, ...quem()})).veiculo; return v; };
+
+/* ---------------- lista ---------------- */
+function telaLista() {
+  v = null;
+  const seg = [['pendente', 'Pendentes'], ['em_andamento', 'Em and.'], ['concluido', 'Feitos'], ['todos', 'Todos']];
+  app.innerHTML = `<input type="text" id="busca" placeholder="Placa (finais), patrimônio, modelo..." value="${esc(busca)}">
+    <div class="seg">${seg.map(([f, t]) => `<button data-f="${f}" class="${filtro === f ? 'on' : ''}">${t}</button>`).join('')}</div>
+    <div id="lista"><div class="dica">Carregando...</div></div>
+    <div class="rodape-lista" id="rodape"></div>
+    <div class="rodape-fixo"><button class="btn cinza" id="novo"><i class="fa-solid fa-circle-plus"></i> Veículo fora da lista</button></div>`;
+  $$('.seg button').forEach(b => b.onclick = () => { filtro = b.dataset.f; telaLista(); });
+  let deb; $('#busca').oninput = e => { busca = e.target.value; clearTimeout(deb); deb = setTimeout(carregarLista, 250); };
+  $('#novo').onclick = telaNovo;
+  carregarLista();
+}
+async function carregarLista() {
+  let ok;
+  try { ok = (await api('/api/veiculos?' + new URLSearchParams({q: busca, filtro}))).veiculos; }
+  catch (e) { const el = $('#lista'); if (el) el.innerHTML = `<div class="aviso verm">${e instanceof TypeError ? 'Sem conexão com o notebook.' : esc(e.message)}</div>`; return; }
+  const el = $('#lista'); if (!el) return;
+  el.innerHTML = ok.length ? ok.slice(0, 60).map(x => `
+      <a class="item" data-id="${x.id}"><div class="l1"><b>${esc(x.chave)}</b>${badge(x.status)}</div>
+      <div>${esc(x.marca_modelo) || '<i>sem descrição</i>'}</div>
+      <small>${esc(x.secretaria)}${x.local_cadastro ? ' · ' + esc(x.local_cadastro) : ''}</small></a>`).join('')
+    + (ok.length > 60 ? `<div class="dica">Mostrando 60 de ${ok.length}. Use a busca.</div>` : '')
+    : '<div class="dica">Nenhum veículo encontrado.</div>';
+  $$('#lista .item').forEach(a => a.onclick = () => telaVeiculo(+a.dataset.id));
+  const r = $('#rodape'); if (r) {
+    r.innerHTML = `<button id="atualizar">Atualizar</button> · <a href="/">Abrir painel</a>`;
+    $('#atualizar').onclick = carregarLista;
+  }
+}
+
+/* ---------------- veículo: confirmar dados ---------------- */
+const CAMPOS_CAD = [['patrimonio', 'Nº de patrimônio'], ['placa', 'Placa'], ['tipo', 'Tipo'],
+  ['marca_modelo', 'Marca / Modelo'], ['ano', 'Ano'], ['chassi', 'Chassi / Nº de série'],
+  ['renavam', 'Renavam'], ['secretaria', 'Secretaria'], ['responsavel', 'Responsável / Motorista']];
+
+async function telaVeiculo(id) {
+  try { v = (await api('/api/veiculos/' + id)).veiculo; } catch (e) { tratar(e); return telaLista(); }
+  const linha = (r, x) => x ? `<div><span>${r}</span><b>${esc(x)}</b></div>` : '';
+  const sit = ['', ...cfg.situacoes].map(s => `<option ${s === (v.situacao || '') ? 'selected' : ''}>${esc(s)}</option>`).join('');
+  let topo = '';
+  if (v.status === 'concluido')
+    topo = `<div class="aviso"><i class="fa-solid fa-circle-check"></i>
+      Vistoria concluída por <b>${esc(v.vistoriador_nome)}</b> em ${fmtData(v.fim)}.</div>
+      <button class="btn verm" id="refazer"><i class="fa-solid fa-rotate-left"></i> Refazer vistoria inteira</button>`;
+  else if (v.status === 'em_andamento')
+    topo = `<div class="aviso"><i class="fa-solid fa-spinner"></i> Vistoria em andamento.</div>`;
+
+  app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
+    <div class="etapa-titulo">${esc(v.chave)}</div>
+    <div class="dica">${esc(v.marca_modelo)}</div>${topo}
+    <div class="dados">${linha('Patrimônio', v.patrimonio)}${linha('Tipo', v.tipo)}${linha('Ano', v.ano)}
+      ${linha('Chassi', v.chassi)}${linha('Renavam', v.renavam)}
+      ${linha('Secretaria', v.secretaria)}${linha('Local cadastrado', v.local_cadastro)}${linha('Responsável', v.responsavel)}</div>
+    ${v.status !== 'concluido' ? `
+    <label>Situação aparente *</label><select id="f-situacao">${sit}</select>
+    <label>Odômetro / Horímetro</label><input type="text" id="f-odometro" inputmode="numeric" value="${esc(v.odometro)}">
+    <label>Local onde está agora</label><input type="text" id="f-local" value="${esc(v.local_visto || v.local_cadastro)}">
+    <label>Observações</label><textarea id="f-obs" rows="2">${esc(v.obs)}</textarea>
+    <details><summary>Corrigir dados do cadastro</summary>
+      ${CAMPOS_CAD.map(([k, r]) => `<label>${r}</label><input type="text" data-cad="${k}" value="${esc(v[k])}">`).join('')}</details>
+    <div id="msg" class="erro"></div>
+    <div class="rodape-fixo"><button class="btn verde" id="iniciar"><i class="fa-solid fa-check"></i> Concluir vistoria</button></div>` : ''}`;
+  $('#voltar').onclick = telaLista;
+  if ($('#refazer')) $('#refazer').onclick = async () => {
+    if (!confirm('Apagar os dados e refazer a vistoria deste veículo?')) return;
+    try { await acao('reiniciar'); telaVeiculo(v.id); } catch (e) { tratar(e); }
+  };
+  if ($('#iniciar')) $('#iniciar').onclick = async () => {
+    const cadastro = {}; $$('[data-cad]').forEach(el => cadastro[el.dataset.cad] = el.value.trim());
+    const dados = {situacao: $('#f-situacao').value, odometro: $('#f-odometro').value, local_visto: $('#f-local').value,
+                   obs: $('#f-obs').value, cadastro};
+    if (!dados.situacao) { $('#msg').textContent = 'Escolha a situação aparente.'; return; }
+    try { await acao('iniciar', dados); await post(`/api/veiculos/${v.id}/concluir`, quem()); telaFim(); }
+    catch (e) { $('#msg').textContent = e.message; }
+  };
+}
+
+function telaFim() {
+  app.innerHTML = `<div class="grande"><i class="fa-solid fa-circle-check"></i><br>Vistoria concluída!</div>
+    <div class="dica">${esc(v.chave)}</div>
+    <button class="btn verde" id="prox"><i class="fa-solid fa-arrow-right"></i> Próximo veículo</button>`;
+  $('#prox').onclick = telaLista;
+}
+
+/* ---------------- veículo fora da lista ---------------- */
+function telaNovo() {
+  app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
+    <div class="etapa-titulo">Veículo fora da lista</div>
+    <div class="dica">Será marcado como “cadastrado em campo” para conferência do patrimônio. Informe a placa ou, se não houver, o nº de patrimônio/série.</div>
+    <label>Placa</label><input type="text" data-k="placa" autocapitalize="characters">
+    <label>Nº de patrimônio</label><input type="text" data-k="patrimonio">
+    <label>Tipo</label><select data-k="tipo"><option value=""></option>${cfg.tipos.map(t => `<option>${esc(t)}</option>`).join('')}</select>
+    <label>Marca / Modelo</label><input type="text" data-k="marca_modelo">
+    <label>Ano</label><input type="text" data-k="ano" inputmode="numeric">
+    <label>Chassi / Nº de série</label><input type="text" data-k="chassi">
+    <label>Secretaria</label><input type="text" data-k="secretaria">
+    <label>Local</label><input type="text" data-k="local_cadastro">
+    <div id="msg" class="erro"></div>
+    <div class="rodape-fixo"><button class="btn verde" id="cad"><i class="fa-solid fa-check"></i> Cadastrar e vistoriar</button></div>`;
+  $('#voltar').onclick = telaLista;
+  $('#cad').onclick = async () => {
+    const d = {}; $$('[data-k]').forEach(el => d[el.dataset.k] = el.value.trim());
+    try { const nv = await post('/api/veiculos', {...d, origem: 'campo'}); telaVeiculo(nv.id); } catch (e) { $('#msg').textContent = e.message; }
+  };
+}
+</script>
+</body>
+</html>

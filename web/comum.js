@@ -1,7 +1,9 @@
-/* Funções auxiliares do painel */
+/* Funções comuns ao painel (PC) e à tela do celular */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const STATUS = {pendente: 'Pendente', em_andamento: 'Em andamento', concluido: 'Concluído'};
+const badge = s => `<span class="badge b-${s}">${STATUS[s] || s}</span>`;
 
 async function api(url, opts = {}) {
   const r = await fetch(url, opts);
@@ -11,3 +13,5 @@ async function api(url, opts = {}) {
   return j;
 }
 const post = (url, dados) => api(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dados || {})});
+
+function fmtData(s) { if (!s) return ''; const m = s.match(/(\d+)-(\d+)-(\d+) (\d+:\d+)/); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}` : s; }

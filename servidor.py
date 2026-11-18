@@ -10,6 +10,7 @@ import json
 import mimetypes
 import re
 import shutil
+import socket
 import sqlite3
 import threading
 import time
@@ -23,6 +24,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+try:
+    import segno
+except ImportError:
+    segno = None
 try:
     from PIL import Image as PILImage, ImageOps
     try:
@@ -164,6 +169,31 @@ def iniciar_banco():
             seq INTEGER DEFAULT 1, arquivo TEXT, legenda TEXT,
             criado_em TEXT, usuario TEXT);
         """)
+
+
+# ------------------------------------------------------------------------ rede --
+def ips_locais():
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    ips = [i for i in ips if not i.startswith("127.") and not i.startswith("169.254.")]
+
+    def ordem(ip):
+        if ip.startswith("192.168.137."):
+            return 0
+        return 1 if ip.startswith("192.168.") else 2
+    ips.sort(key=lambda i: (ordem(i), i))
+    return ips or ["192.168.137.1"]
 
 
 # ------------------------------------------------------------- regras de dados --
@@ -442,6 +472,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.arquivo(alvo)
         if p.startswith("/fotos/"):
             return self.servir_foto(p)
+        if p == "/qr.svg":
+            if segno is None:
+                raise RotaErro("QR Code indisponível (instale: pip install segno)", 501)
+            buf = io.BytesIO()
+            segno.make(self.q.get("url", ""), error="m").save(buf, kind="svg", scale=6, border=2)
+            return self.enviar(buf.getvalue(), "image/svg+xml")
         if p == "/api/config":
             return self.json(self.config())
         if p == "/api/veiculos":
@@ -460,7 +496,9 @@ class Handler(BaseHTTPRequestHandler):
         raise RotaErro("Rota não encontrada", 404)
 
     def config(self):
-        return {"ok": True, "etapas": ETAPAS, "situacoes": SITUACOES, "tipos": TIPOS}
+        urls = [{"ip": ip, "celular": f"http://{ip}:{PORTA_HTTP}/m"} for ip in ips_locais()]
+        return {"ok": True, "etapas": ETAPAS, "situacoes": SITUACOES, "tipos": TIPOS,
+                "urls": urls, "qr_ok": segno is not None}
 
     def listar(self):
         q, filtro = norm(self.q.get("q", "")), self.q.get("filtro", "todos")
@@ -681,12 +719,15 @@ def principal():
     print("=" * 62)
     print("  LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA")
     print("=" * 62)
+    if segno is None:
+        print("  [!] QR Code desativado (instale: pip install segno).")
 
     http = Servidor(("0.0.0.0", PORTA_HTTP), Handler)
     threading.Thread(target=http.serve_forever, daemon=True).start()
 
+    ip = ips_locais()[0]
     print(f"\n  Painel (neste PC):  http://localhost:{PORTA_HTTP}")
-    print(f"  Celular:            http://IP-DO-NOTEBOOK:{PORTA_HTTP}/m   (veja o IP com o comando ipconfig)")
+    print(f"  Celular:            http://{ip}:{PORTA_HTTP}/m")
     print(f"  Dados salvos em:    {DADOS}")
     print("\n  Deixe esta janela aberta durante o levantamento. Ctrl+C para encerrar.\n")
     threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{PORTA_HTTP}")).start()

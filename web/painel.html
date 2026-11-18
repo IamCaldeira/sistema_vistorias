@@ -19,6 +19,14 @@
 </header>
 
 <main>
+  <section class="caixa qr" id="qrbox">
+      <h3><i class="fa-solid fa-qrcode"></i> Vistoria no celular</h3>
+      <div id="qrimg"></div>
+      <div class="url" id="qrurl"></div>
+      <select id="qrip" style="display:none"></select>
+      <div class="leg">O celular precisa estar na mesma rede (hotspot) do notebook.</div>
+  </section>
+
   <section class="caixa">
     <h3><i class="fa-solid fa-list-check"></i> Veículos e máquinas <span id="contagem"></span></h3>
     <div class="ferr">
@@ -80,10 +88,27 @@ $$('.modal').forEach(m => m.addEventListener('mousedown', e => { if (e.target ==
 function tratar(e) { alert(e.message); }
 
 (async () => {
-  cfg = await api('/api/config');
+  await montarQR();
   await carregar();
   setInterval(() => { if (!modalAberto()) carregar().catch(() => {}); }, 8000);
+  setInterval(() => montarQR().catch(() => {}), 30000);
 })();
+
+/* ---------- QR code ---------- */
+async function montarQR() {
+  cfg = await api('/api/config');
+  const sel = $('#qrip'), atual = sel.value, opcoes = cfg.urls.map(u => u.ip);
+  if (sel.dataset.ips !== opcoes.join(',')) {
+    sel.innerHTML = cfg.urls.map(u => `<option value="${u.ip}">${u.ip}</option>`).join('');
+    sel.dataset.ips = opcoes.join(',');
+    if (opcoes.includes(atual)) sel.value = atual;
+  }
+  sel.style.display = cfg.urls.length > 1 ? 'block' : 'none'; sel.onchange = montarQR;
+  const u = cfg.urls.find(x => x.ip === sel.value) || cfg.urls[0];
+  $('#qrurl').textContent = u.celular;
+  $('#qrimg').innerHTML = cfg.qr_ok ? `<img alt="QR Code" src="/qr.svg?url=${encodeURIComponent(u.celular)}">`
+    : '<div class="leg">QR Code indisponível. Rode instalar.bat (pacote segno).</div>';
+}
 
 /* ---------- lista de veículos ---------- */
 async function carregar() {

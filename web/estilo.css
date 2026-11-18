@@ -3,4 +3,5 @@
 .modal{position:fixed;inset:0;display:none;background:#fff;overflow:auto;z-index:40}
 .modal.aberto{display:block}
 img[src$="brasao.png"]{height:64px;width:auto}
+.qr img{width:200px;height:200px}
 .rodape-fixo{background:#fff}

@@ -9,6 +9,7 @@ import io
 import json
 import mimetypes
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -21,9 +22,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+try:
+    from PIL import Image as PILImage, ImageOps
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+except ImportError:
+    PILImage = None
+
 RAIZ = Path(__file__).resolve().parent
 WEB = RAIZ / "web"
 DADOS = RAIZ / "dados"
+FOTOS_DIR = DADOS / "fotos"
+MINI_DIR = DADOS / "miniaturas"
+EXCL_DIR = DADOS / "excluidos"
 DB_PATH = DADOS / "frota.db"
 PORTA_HTTP = 8000
 LIMITE_UPLOAD = 60 * 1024 * 1024
@@ -112,7 +126,8 @@ class RotaErro(Exception):
 
 
 def iniciar_banco():
-    DADOS.mkdir(parents=True, exist_ok=True)
+    for d in (DADOS, FOTOS_DIR, MINI_DIR, EXCL_DIR):
+        d.mkdir(parents=True, exist_ok=True)
     with conexao() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS veiculos(
@@ -124,12 +139,32 @@ def iniciar_banco():
             status TEXT DEFAULT 'pendente', situacao TEXT, odometro TEXT,
             local_visto TEXT, obs TEXT, vistoriador_nome TEXT,
             vistoriador_matricula TEXT, inicio TEXT, fim TEXT);
+        CREATE TABLE IF NOT EXISTS fotos(
+            id INTEGER PRIMARY KEY, veiculo_id INTEGER NOT NULL,
+            seq INTEGER DEFAULT 1, arquivo TEXT, legenda TEXT,
+            criado_em TEXT, usuario TEXT);
         """)
 
 
 # ------------------------------------------------------------- regras de dados --
+def fotos_do_veiculo(c, vid):
+    return [dict(f) for f in c.execute(
+        "SELECT * FROM fotos WHERE veiculo_id=? ORDER BY id", (vid,))]
+
+
 def veiculo_dict(c, v, completo=False):
-    return dict(v)
+    fotos = fotos_do_veiculo(c, v["id"])
+    d = dict(v)
+    d["n_fotos"] = len(fotos)
+    if completo:
+        for f in fotos:
+            f["url"] = f"/fotos/{v['chave']}/{f['arquivo']}"
+        d["fotos"] = fotos
+    return d
+
+
+def pasta_fotos(chave):
+    return FOTOS_DIR / chave
 
 
 def achar(c, vid):
@@ -139,8 +174,14 @@ def achar(c, vid):
     return v
 
 
+def apagar_arquivo_foto(chave, arquivo):
+    (pasta_fotos(chave) / arquivo).unlink(missing_ok=True)
+    for m in MINI_DIR.glob(f"{chave}__*__{arquivo}.jpg"):
+        m.unlink(missing_ok=True)
+
+
 def gravar_cadastro(c, v, dados):
-    """Atualiza campos do cadastro (a identificação muda se a placa mudar)."""
+    """Atualiza campos do cadastro. Renomeia a chave/pasta se a placa mudar."""
     novos = {k: txt(dados[k]) for k in CAD if k in dados}
     placa = novos.get("placa", v["placa"])
     pat = novos.get("patrimonio", v["patrimonio"])
@@ -150,6 +191,9 @@ def gravar_cadastro(c, v, dados):
     if chave != v["chave"]:
         if c.execute("SELECT 1 FROM veiculos WHERE chave=? AND id<>?", (chave, v["id"])).fetchone():
             raise RotaErro(f"Já existe outro veículo com a identificação {chave}.")
+        antiga, nova = pasta_fotos(v["chave"]), pasta_fotos(chave)
+        if antiga.exists() and not nova.exists():
+            antiga.rename(nova)
         novos["chave"] = chave
     if novos:
         sets = ", ".join(f"{k}=?" for k in novos)
@@ -250,6 +294,18 @@ def csv_bytes(cabecalho, linhas):
 
 
 # -------------------------------------------------------------------- servidor --
+def tipo_imagem(dados):
+    if dados[:2] == b"\xff\xd8":
+        return "jpg"
+    if dados[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if dados[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1", b"ftypheim", b"ftypheis", b"ftyphevc"):
+        return "heic"
+    if dados[:4] == b"RIFF" and dados[8:12] == b"WEBP":
+        return "webp"
+    return "jpg"
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -333,6 +389,8 @@ class Handler(BaseHTTPRequestHandler):
             if WEB.resolve() not in alvo.parents:
                 raise RotaErro("Não permitido", 403)
             return self.arquivo(alvo)
+        if p.startswith("/fotos/"):
+            return self.servir_foto(p)
         if p == "/api/config":
             return self.json(self.config())
         if p == "/api/veiculos":
@@ -367,6 +425,26 @@ class Handler(BaseHTTPRequestHandler):
             out.append(v)
         return out
 
+    def servir_foto(self, p):
+        partes = p.split("/")
+        if len(partes) != 4 or not re.fullmatch(r"[A-Z0-9]+", partes[2]) or not re.fullmatch(r"[\w.\-]+", partes[3]):
+            raise RotaErro("Não permitido", 403)
+        chave, arq = partes[2], partes[3]
+        origem = pasta_fotos(chave) / arq
+        w = int(self.q.get("w") or 0)
+        if w and PILImage is not None and origem.is_file():
+            mini = MINI_DIR / f"{chave}__{w}__{arq}.jpg"
+            if not mini.exists():
+                try:
+                    with PILImage.open(origem) as im:
+                        im = ImageOps.exif_transpose(im).convert("RGB")
+                    im.thumbnail((w, w))
+                    im.save(mini, "JPEG", quality=80)
+                except Exception:
+                    return self.arquivo(origem)
+            return self.arquivo(mini)
+        return self.arquivo(origem)
+
     def exportar(self):
         with conexao() as c:
             vs = [veiculo_dict(c, v) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
@@ -374,14 +452,14 @@ class Handler(BaseHTTPRequestHandler):
                "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro",
                "status", "situacao_aparente", "odometro_horimetro", "local_verificado",
                "observacoes", "vistoriador", "matricula", "inicio", "fim",
-               "origem"]
+               "n_fotos", "origem"]
         linhas = []
         for v in vs:
             linhas.append([v["chave"], v["patrimonio"], v["placa"], v["tipo"], v["marca_modelo"],
                            v["ano"], v["chassi"], v["renavam"], v["secretaria"], v["local_cadastro"],
                            v["responsavel"], v["situacao_cadastro"], v["status"], v["situacao"],
                            v["odometro"], v["local_visto"], v["obs"], v["vistoriador_nome"],
-                           v["vistoriador_matricula"], v["inicio"], v["fim"], v["origem"]])
+                           v["vistoriador_matricula"], v["inicio"], v["fim"], v["n_fotos"], v["origem"]])
         nome = "frota_" + datetime.now().strftime("%Y%m%d_%H%M") + ".csv"
         self.enviar(csv_bytes(cab, linhas), "text/csv; charset=utf-8", 200,
                     {"Content-Disposition": f'attachment; filename="{nome}"'})
@@ -389,12 +467,17 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST
     def rota_post(self):
         p = self.caminho
+        if p == "/api/foto":
+            return self.salvar_foto()
         if p == "/api/importar":
             nome = self.q.get("nome", "planilha.csv")
             with conexao() as c:
                 return self.json({"ok": True, **importar(c, nome, self.corpo)})
         if p == "/api/veiculos":
             return self.criar_veiculo()
+        m = re.fullmatch(r"/api/foto/(\d+)/(apagar|legenda)", p)
+        if m:
+            return self.acao_foto(int(m[1]), m[2])
         m = re.fullmatch(r"/api/veiculos/(\d+)/(\w+)", p)
         if m:
             return self.acao_veiculo(int(m[1]), m[2])
@@ -446,21 +529,63 @@ class Handler(BaseHTTPRequestHandler):
             elif acao == "concluir":
                 if not txt(v["situacao"]):
                     raise RotaErro("Informe a situação aparente antes de concluir.")
+                if v["situacao"] != "Não localizado" and not fotos_do_veiculo(c, vid):
+                    raise RotaErro("Tire pelo menos uma foto antes de concluir.")
                 sets = {"status": "concluido", "fim": agora()}
                 if not v["vistoriador_nome"] and u["nome"]:
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
                 c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
                           [*sets.values(), vid])
             elif acao == "reiniciar":
+                for f in c.execute("SELECT * FROM fotos WHERE veiculo_id=?", (vid,)).fetchall():
+                    apagar_arquivo_foto(v["chave"], f["arquivo"])
+                c.execute("DELETE FROM fotos WHERE veiculo_id=?", (vid,))
                 c.execute("UPDATE veiculos SET status='pendente', situacao=NULL, odometro=NULL, local_visto=NULL, "
                           "obs=NULL, vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL "
                           "WHERE id=?", (vid,))
             elif acao == "excluir":
+                pasta = pasta_fotos(v["chave"])
+                if pasta.exists():
+                    shutil.move(str(pasta), str(EXCL_DIR / f"{v['chave']}_{int(time.time())}"))
+                c.execute("DELETE FROM fotos WHERE veiculo_id=?", (vid,))
                 c.execute("DELETE FROM veiculos WHERE id=?", (vid,))
                 return self.json({"ok": True})
             else:
                 raise RotaErro("Ação inválida.", 404)
             return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
+
+    def salvar_foto(self):
+        vid = int(self.q.get("id") or 0)
+        if not self.corpo:
+            raise RotaErro("Foto vazia.")
+        with conexao() as c:
+            v = achar(c, vid)
+            seq = (c.execute("SELECT COALESCE(MAX(seq),0) FROM fotos WHERE veiculo_id=?",
+                             (vid,)).fetchone()[0]) + 1
+            nome = f"foto_{seq:02d}.{tipo_imagem(self.corpo)}"
+            pasta = pasta_fotos(v["chave"])
+            pasta.mkdir(parents=True, exist_ok=True)
+            (pasta / nome).write_bytes(self.corpo)
+            c.execute("INSERT INTO fotos(veiculo_id, seq, arquivo, legenda, criado_em, usuario) VALUES(?,?,?,?,?,?)",
+                      (vid, seq, nome, txt(self.q.get("legenda")), agora(), txt(self.q.get("vistoriador"))))
+            c.execute("UPDATE veiculos SET status=CASE WHEN status='pendente' THEN 'em_andamento' ELSE status END "
+                      "WHERE id=?", (vid,))
+            print(f"   {v['chave']}/{nome} ({len(self.corpo) // 1024} KB)")
+            self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
+
+    def acao_foto(self, fid, acao):
+        d = self.corpo_json() if self.corpo else {}
+        with conexao() as c:
+            f = c.execute("SELECT * FROM fotos WHERE id=?", (fid,)).fetchone()
+            if not f:
+                raise RotaErro("Foto não encontrada", 404)
+            v = achar(c, f["veiculo_id"])
+            if acao == "apagar":
+                apagar_arquivo_foto(v["chave"], f["arquivo"])
+                c.execute("DELETE FROM fotos WHERE id=?", (fid,))
+            else:
+                c.execute("UPDATE fotos SET legenda=? WHERE id=?", (txt(d.get("legenda")), fid))
+            self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, v["id"]), True)})
 
 
 class Servidor(ThreadingHTTPServer):

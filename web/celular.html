@@ -52,8 +52,8 @@ $('#trocar').onclick = telaIdentificacao;
 /* ---------------- comunicação com o notebook ---------------- */
 const quem = () => ({vistoriador_nome: vistoriador.nome, vistoriador_matricula: vistoriador.matricula});
 const acao = async (nome, dados) => { v = (await post(`/api/veiculos/${v.id}/${nome}`, {...dados, ...quem()})).veiculo; return v; };
-async function enviarFoto(file, legenda) {
-  const q = new URLSearchParams({id: v.id, legenda: legenda || '', vistoriador: vistoriador.nome});
+async function enviarFoto(etapaId, file, legenda) {
+  const q = new URLSearchParams({id: v.id, etapa: etapaId, legenda: legenda || '', vistoriador: vistoriador.nome});
   v = (await api('/api/foto?' + q, {method: 'POST', headers: {'Content-Type': file.type || 'image/jpeg'}, body: file})).veiculo;
 }
 const srcFoto = (f, w) => `${f.url}?w=${w}`;
@@ -103,10 +103,10 @@ async function telaVeiculo(id) {
   if (v.status === 'concluido')
     topo = `<div class="aviso"><i class="fa-solid fa-circle-check"></i>
       Vistoria concluída por <b>${esc(v.vistoriador_nome)}</b> em ${fmtData(v.fim)}.</div>
-      <button class="btn cinza" id="verRev"><i class="fa-solid fa-images"></i> Ver fotos</button>
+      <button class="btn cinza" id="verRev"><i class="fa-solid fa-images"></i> Ver revisão das fotos</button>
       <button class="btn verm" id="refazer"><i class="fa-solid fa-rotate-left"></i> Refazer vistoria inteira</button>`;
   else if (v.status === 'em_andamento')
-    topo = `<div class="aviso"><i class="fa-solid fa-spinner"></i> Vistoria em andamento (${v.n_fotos} foto(s)).</div>`;
+    topo = `<div class="aviso"><i class="fa-solid fa-spinner"></i> Vistoria em andamento (${v.etapas_feitas}/${v.etapas_total} etapas).</div>`;
 
   app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
     <div class="etapa-titulo">${esc(v.chave)}</div>
@@ -123,9 +123,9 @@ async function telaVeiculo(id) {
       ${CAMPOS_CAD.map(([k, r]) => `<label>${r}</label><input type="text" data-cad="${k}" value="${esc(v[k])}">`).join('')}</details>
     <div id="msg" class="erro"></div>
     <div class="rodape-fixo"><button class="btn verde" id="iniciar"><i class="fa-solid fa-camera"></i>
-      ${v.status === 'em_andamento' ? 'Salvar e continuar fotos' : 'Salvar e tirar fotos'}</button></div>` : ''}`;
+      ${v.status === 'em_andamento' ? 'Salvar e continuar fotos' : 'Iniciar fotos'}</button></div>` : ''}`;
   $('#voltar').onclick = telaLista;
-  if ($('#verRev')) $('#verRev').onclick = telaFotos;
+  if ($('#verRev')) $('#verRev').onclick = telaRevisao;
   if ($('#refazer')) $('#refazer').onclick = async () => {
     if (!confirm('Apagar todas as fotos e refazer a vistoria deste veículo?')) return;
     try { await acao('reiniciar'); telaVeiculo(v.id); } catch (e) { tratar(e); }
@@ -135,55 +135,110 @@ async function telaVeiculo(id) {
     const dados = {situacao: $('#f-situacao').value, odometro: $('#f-odometro').value, local_visto: $('#f-local').value,
                    obs: $('#f-obs').value, cadastro};
     if (!dados.situacao) { $('#msg').textContent = 'Escolha a situação aparente.'; return; }
-    try { await acao('iniciar', dados); telaFotos(); }
+    try { await acao('iniciar', dados); if (v.situacao === 'Não localizado') telaRevisao(); else proxima(); }
     catch (e) { $('#msg').textContent = e.message; }
   };
 }
 
 /* ---------------- fotos ---------------- */
+function proxima() { const i = v.etapas.findIndex(e => e.status === 'pendente'); if (i < 0) telaRevisao(); else telaFoto(i); }
+const avancar = idx => idx + 1 >= v.etapas.length ? telaRevisao() : telaFoto(idx + 1);
 function miniaturas(fotos, apagavel) {
   return fotos.length ? `<div class="miniaturas">${fotos.map(f => `<figure><img src="${srcFoto(f, 300)}" alt="" onerror="this.style.visibility='hidden'">
     <figcaption>${esc(f.legenda) || '&nbsp;'}</figcaption>
     ${apagavel ? `<button class="x" data-del="${f.id}"><i class="fa-solid fa-xmark"></i></button>` : ''}</figure>`).join('')}</div>` : '';
 }
-function telaFotos() {
-  const naoLoc = v.situacao === 'Não localizado', fechado = v.status === 'concluido';
-  app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
-    <div class="etapa-titulo">Fotos · ${esc(v.chave)}</div>
-    <div class="dica">Fotografe o veículo: frente, traseira, laterais, placa, painel, avarias...</div>
-    ${naoLoc ? '<div class="aviso">Veículo marcado como <b>não localizado</b>. Não é necessário tirar fotos.</div>' : ''}
+async function telaFoto(idx) {
+  const e = v.etapas[idx], fotos = v.fotos.filter(f => f.etapa === e.id), n = v.etapas.length, temFoto = fotos.length > 0;
+  let botoes;
+  if (e.multi) {
+    botoes = `<button class="btn" id="tirar"><i class="fa-solid fa-camera"></i> ${temFoto ? 'Adicionar outra foto' : (e.avarias ? 'Tirar foto da avaria' : 'Tirar foto')}</button>`;
+    if (temFoto) botoes += `<button class="btn verde" id="concluirEtapa"><i class="fa-solid fa-check"></i> Concluir etapa</button>`;
+    else botoes += e.avarias
+      ? `<button class="btn verde" id="semAv"><i class="fa-solid fa-circle-check"></i> Sem avarias visíveis</button>`
+      : `<button class="btn cinza" id="pular"><i class="fa-solid fa-forward"></i> Não se aplica / pular</button>`;
+  } else if (temFoto) {
+    botoes = `<button class="btn" id="tirar"><i class="fa-solid fa-camera"></i> Tirar novamente</button>
+              <button class="btn verde" id="concluirEtapa"><i class="fa-solid fa-check"></i> Manter e continuar</button>`;
+  } else {
+    botoes = `<button class="btn" id="tirar"><i class="fa-solid fa-camera"></i> Tirar foto</button>
+              <button class="btn cinza" id="pular"><i class="fa-solid fa-forward"></i> Não se aplica / pular</button>`;
+  }
+  app.innerHTML = `<button class="btn sec peq" id="sairVist"><i class="fa-solid fa-arrow-left"></i> Pausar vistoria</button>
+    <div class="progresso"><div></div></div>
+    <small>${esc(v.chave)} · Etapa ${idx + 1} de ${n}</small>
+    <div class="etapa-titulo">${esc(e.titulo)}</div><div class="dica">${esc(e.dica)}</div>
     <input type="file" id="arq" accept="image/*" capture="environment" hidden>
-    ${fechado || naoLoc ? '' : '<button class="btn" id="tirar"><i class="fa-solid fa-camera"></i> Tirar foto</button>'}
-    ${miniaturas(v.fotos, !fechado)}
-    <div id="msg" class="erro"></div>
-    ${fechado ? '' : `<div class="rodape-fixo"><button class="btn verde" id="concluir"><i class="fa-solid fa-file-circle-check"></i> Concluir vistoria</button></div>`}`;
-  $('#voltar').onclick = telaLista;
-  if ($('#tirar')) $('#tirar').onclick = () => { $('#arq').value = ''; $('#arq').click(); };
-  $('#arq').onchange = ev => { const f = ev.target.files[0]; if (f) previaFoto(f); };
+    ${botoes}${miniaturas(fotos, true)}<div id="msg" class="erro"></div>`;
+  $('#sairVist').onclick = () => telaVeiculo(v.id);
+  const erro = t => { const m = $('#msg'); if (m) m.textContent = t; };
+  $('#tirar').onclick = () => { $('#arq').value = ''; $('#arq').click(); };
+  $('#arq').onchange = async ev => {
+    const f = ev.target.files[0]; if (!f) return;
+    if (e.multi) return previaFoto(idx, f);
+    $$('.btn').forEach(b => b.disabled = true); erro('Salvando foto...');
+    try { await enviarFoto(e.id, f, ''); avancar(idx); } catch (er) { $$('.btn').forEach(b => b.disabled = false); erro(er.message); }
+  };
+  if ($('#concluirEtapa')) $('#concluirEtapa').onclick = () => avancar(idx);
+  if ($('#pular')) $('#pular').onclick = async () => {
+    if (!confirm('Pular: ' + e.titulo + '?')) return;
+    try { await acao('pular', {etapa: e.id}); avancar(idx); } catch (er) { tratar(er); }
+  };
+  if ($('#semAv')) $('#semAv').onclick = async () => { try { await acao('sem_avarias'); avancar(idx); } catch (er) { tratar(er); } };
   $$('[data-del]').forEach(b => b.onclick = async () => {
     if (!confirm('Apagar esta foto?')) return;
-    try { v = (await post(`/api/foto/${b.dataset.del}/apagar`)).veiculo; telaFotos(); } catch (er) { tratar(er); }
+    try { v = (await post(`/api/foto/${b.dataset.del}/apagar`)).veiculo; telaFoto(idx); } catch (er) { tratar(er); }
   });
-  if ($('#concluir')) $('#concluir').onclick = async ev => {
-    const b = ev.currentTarget; b.disabled = true;
-    try { await post(`/api/veiculos/${v.id}/concluir`, quem()); telaFim(); }
-    catch (er) { b.disabled = false; $('#msg').textContent = er.message; }
-  };
 }
-function previaFoto(file) {
-  const url = URL.createObjectURL(file);
-  app.innerHTML = `<div class="etapa-titulo">Nova foto</div>
+function previaFoto(idx, file) {
+  const e = v.etapas[idx], url = URL.createObjectURL(file);
+  const ex = e.avarias ? 'ex.: lanterna traseira quebrada' : 'ex.: pneu dianteiro direito gasto';
+  app.innerHTML = `<div class="etapa-titulo">${esc(e.titulo)}</div>
     <img class="prev" src="${url}" alt="">
-    <label>Legenda (opcional)</label><input type="text" id="legenda" placeholder="ex.: frente, lanterna traseira quebrada">
-    <button class="btn verde" id="salvar"><i class="fa-solid fa-check"></i> Salvar foto</button>
-    <button class="btn cinza" id="descartar"><i class="fa-solid fa-trash"></i> Descartar</button>
+    <label>Legenda / observação (opcional)</label><input type="text" id="legenda" placeholder="${ex}">
+    <button class="btn" id="maisUma"><i class="fa-solid fa-plus"></i> Salvar e adicionar outra</button>
+    <button class="btn verde" id="salvarFim"><i class="fa-solid fa-check"></i> Salvar e concluir etapa</button>
+    <button class="btn cinza" id="descartar"><i class="fa-solid fa-trash"></i> Descartar foto</button>
     <div id="msg" class="erro"></div>`;
-  $('#salvar').onclick = async () => {
+  const salvar = async depois => {
     $$('.btn').forEach(b => b.disabled = true); $('#msg').textContent = 'Salvando foto...';
-    try { await enviarFoto(file, $('#legenda').value); URL.revokeObjectURL(url); telaFotos(); }
+    try { await enviarFoto(e.id, file, $('#legenda').value); URL.revokeObjectURL(url); depois(); }
     catch (er) { $$('.btn').forEach(b => b.disabled = false); $('#msg').textContent = er.message; }
   };
-  $('#descartar').onclick = telaFotos;
+  $('#maisUma').onclick = () => salvar(() => telaFoto(idx));
+  $('#salvarFim').onclick = () => salvar(() => avancar(idx));
+  $('#descartar').onclick = () => telaFoto(idx);
+}
+
+/* ---------------- revisão e conclusão ---------------- */
+async function telaRevisao() {
+  const naoLoc = v.situacao === 'Não localizado', faltam = v.etapas.filter(e => e.status === 'pendente');
+  const linhas = naoLoc ? '' : v.etapas.map((e, i) => {
+    const fotos = v.fotos.filter(f => f.etapa === e.id);
+    const ic = e.status === 'ok' || e.status === 'sem_avarias' ? '<i class="fa-solid fa-circle-check ok-i"></i>'
+      : e.status === 'pulada' ? '<i class="fa-solid fa-forward pul-i"></i>' : '<i class="fa-solid fa-circle-exclamation pen-i"></i>';
+    const tx = e.status === 'sem_avarias' ? 'Sem avarias visíveis' : e.status === 'pulada' ? 'Pulada' : e.status === 'pendente' ? 'Falta' : '';
+    return `<div class="rev"><div class="l1">${ic}<b>${esc(e.titulo)}</b><small>${tx}</small>
+      <button class="btn sec peq" data-ir="${i}">${e.status === 'pendente' ? 'Fazer' : 'Refazer'}</button></div>${miniaturas(fotos, false)}</div>`;
+  }).join('');
+  app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
+    <div class="etapa-titulo">Revisão · ${esc(v.chave)}</div>
+    <div class="dados"><div><span>Situação</span><b>${esc(v.situacao)}</b></div>
+      <div><span>Odômetro/Horímetro</span><b>${esc(v.odometro) || '—'}</b></div></div>
+    ${naoLoc ? '<div class="aviso">Veículo marcado como <b>não localizado</b>. Não é necessário tirar fotos.</div>' : linhas}
+    <div id="msg" class="erro"></div>
+    <div class="rodape-fixo"><button class="btn verde" id="concluir" ${!naoLoc && faltam.length ? 'disabled' : ''}>
+      <i class="fa-solid fa-file-circle-check"></i> ${!naoLoc && faltam.length ? 'Faltam ' + faltam.length + ' etapa(s)' : 'Concluir vistoria'}</button></div>`;
+  $('#voltar').onclick = telaLista;
+  $$('[data-ir]').forEach(b => b.onclick = async () => {
+    const i = +b.dataset.ir, e = v.etapas[i];
+    try { if (e.status !== 'pendente') await acao('refazer_etapa', {etapa: e.id}); telaFoto(i); } catch (er) { tratar(er); }
+  });
+  $('#concluir').onclick = async ev => {
+    const b = ev.currentTarget; b.disabled = true; b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+    try { telaFim(await post(`/api/veiculos/${v.id}/concluir`, quem())); }
+    catch (er) { b.disabled = false; $('#msg').textContent = er.message; }
+  };
 }
 function telaFim() {
   app.innerHTML = `<div class="grande"><i class="fa-solid fa-circle-check"></i><br>Vistoria concluída!</div>

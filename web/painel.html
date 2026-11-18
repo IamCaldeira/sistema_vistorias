@@ -34,7 +34,7 @@
     <div class="tab-wrap">
       <table>
         <thead><tr><th>Identificação</th><th>Patrimônio</th><th>Tipo</th><th>Marca / Modelo</th><th>Chassi</th><th>Renavam</th><th>Secretaria</th>
-          <th>Status</th><th>Situação</th><th>Fotos</th><th>Vistoriador</th></tr></thead>
+          <th>Status</th><th>Situação</th><th>Etapas</th><th>Vistoriador</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
@@ -95,7 +95,7 @@ function renderTabela(vs) {
   $('#tbody').innerHTML = vs.length ? vs.map(v => `<tr data-id="${v.id}">
     <td><b>${esc(v.chave)}</b></td><td>${esc(v.patrimonio)}</td><td>${esc(v.tipo)}</td>
     <td>${esc(v.marca_modelo)}</td><td>${esc(v.chassi)}</td><td>${esc(v.renavam)}</td><td>${esc(v.secretaria)}</td><td>${badge(v.status)}</td>
-    <td>${esc(v.situacao)}</td><td>${v.n_fotos || ''}</td>
+    <td>${esc(v.situacao)}</td><td>${v.status === 'pendente' ? '' : v.etapas_feitas + '/' + v.etapas_total + ' · ' + v.n_fotos + ' fotos'}</td>
     <td>${esc(v.vistoriador_nome)}</td></tr>`).join('')
     : '<tr><td colspan="11" class="vazio">Nenhum veículo encontrado.</td></tr>';
   $$('#tbody tr[data-id]').forEach(tr => tr.onclick = () => abrirDetalhe(+tr.dataset.id));
@@ -114,9 +114,11 @@ async function abrirDetalhe(id) {
 }
 function renderDetalhe(v) {
   const sit = ['', ...cfg.situacoes].map(s => `<option ${s === (v.situacao || '') ? 'selected' : ''}>${esc(s)}</option>`).join('');
+  const etapas = v.etapas.map(e => `<span class="${e.status}">${esc(e.titulo)}${e.n ? ' (' + e.n + ')' : ''}${e.status === 'pulada' ? ' · pulada' : ''}${e.status === 'sem_avarias' ? ' · sem avarias' : ''}</span>`).join('');
   const fotos = v.fotos.map(f => {
+    const e = v.etapas.find(x => x.id === f.etapa);
     return `<figure><a href="${f.url}" target="_blank"><img loading="lazy" src="${f.url}?w=420" alt=""></a>
-      <figcaption><b>Foto ${f.seq}</b>
+      <figcaption><b>${esc(e ? e.titulo : f.etapa)}</b>${f.seq > 1 ? ' #' + f.seq : ''}
       <input type="text" data-foto="${f.id}" placeholder="Legenda (opcional)" value="${esc(f.legenda)}">
       <div>
         <span>${fmtData(f.criado_em).slice(-5)}</span>
@@ -141,6 +143,7 @@ function renderDetalhe(v) {
       · <i class="fa-regular fa-clock"></i> ${fmtData(v.inicio) || '—'} → ${fmtData(v.fim) || '—'}
       ${v.origem === 'campo' ? '<br><i class="fa-solid fa-circle-plus a-campo"></i> Cadastrado em campo (não constava na lista do patrimônio)' : ''}
     </div>
+    <div class="etapas">${etapas}</div>
     <h3><i class="fa-solid fa-camera"></i> Fotos (${v.n_fotos})</h3>
     <div class="fotos">${fotos || '<div class="vazio">Nenhuma foto registrada.</div>'}</div>
     <div class="erro" id="erroDet"></div>

@@ -16,6 +16,7 @@ import time
 import traceback
 import unicodedata
 import webbrowser
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,24 @@ LIMITE_UPLOAD = 60 * 1024 * 1024
 
 
 # ------------------------------------------------------------- definições ----
+ETAPAS = [
+    {"id": "frente", "titulo": "Frente do veículo"},
+    {"id": "traseira", "titulo": "Traseira do veículo"},
+    {"id": "lateral_esquerda", "titulo": "Lateral esquerda"},
+    {"id": "lateral_direita", "titulo": "Lateral direita"},
+    {"id": "placa_patrimonio", "titulo": "Placa e/ou plaqueta de patrimônio"},
+    {"id": "chassi_serie", "titulo": "Chassi ou plaqueta de série",
+     "dica": "Quando estiver acessível."},
+    {"id": "painel", "titulo": "Painel (odômetro/horímetro)"},
+    {"id": "interior", "titulo": "Interior (bancos/cabine)"},
+    {"id": "pneus", "titulo": "Pneus", "multi": True,
+     "dica": "Recomendado: 2 fotos (lado esquerdo e lado direito). "
+             "Máquinas e caminhões: quantas forem necessárias. Legenda opcional."},
+    {"id": "avarias", "titulo": "Avarias visíveis", "multi": True, "avarias": True,
+     "dica": "Uma foto por avaria, com legenda opcional (ex.: lanterna traseira "
+             "quebrada). Se não houver, toque em “Sem avarias visíveis”."},
+    {"id": "motor", "titulo": "Compartimento do motor (visão geral)"},
+]
 SITUACOES = ["Em uso", "Parado", "Em oficina", "Inservível / sucata", "Não localizado"]
 TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ônibus",
          "Ambulância", "Caminhão", "Motocicleta", "Trator", "Retroescavadeira",
@@ -138,9 +157,10 @@ def iniciar_banco():
             origem TEXT DEFAULT 'importado', criado_em TEXT,
             status TEXT DEFAULT 'pendente', situacao TEXT, odometro TEXT,
             local_visto TEXT, obs TEXT, vistoriador_nome TEXT,
-            vistoriador_matricula TEXT, inicio TEXT, fim TEXT);
+            vistoriador_matricula TEXT, inicio TEXT, fim TEXT,
+            puladas TEXT DEFAULT '[]', sem_avarias INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS fotos(
-            id INTEGER PRIMARY KEY, veiculo_id INTEGER NOT NULL,
+            id INTEGER PRIMARY KEY, veiculo_id INTEGER NOT NULL, etapa TEXT,
             seq INTEGER DEFAULT 1, arquivo TEXT, legenda TEXT,
             criado_em TEXT, usuario TEXT);
         """)
@@ -152,11 +172,36 @@ def fotos_do_veiculo(c, vid):
         "SELECT * FROM fotos WHERE veiculo_id=? ORDER BY id", (vid,))]
 
 
+def status_etapas(v, fotos):
+    cont = Counter(f["etapa"] for f in fotos)
+    puladas = set(json.loads(v["puladas"] or "[]"))
+    res = []
+    for e in ETAPAS:
+        n = cont.get(e["id"], 0)
+        if n:
+            s = "ok"
+        elif e.get("avarias") and v["sem_avarias"]:
+            s = "sem_avarias"
+        elif e["id"] in puladas:
+            s = "pulada"
+        else:
+            s = "pendente"
+        res.append({"id": e["id"], "titulo": e["titulo"], "status": s, "n": n,
+                    "multi": bool(e.get("multi")), "avarias": bool(e.get("avarias")),
+                    "dica": e.get("dica", "")})
+    return res
+
+
 def veiculo_dict(c, v, completo=False):
     fotos = fotos_do_veiculo(c, v["id"])
     d = dict(v)
+    d["puladas_lista"] = json.loads(d.get("puladas") or "[]")
     d["n_fotos"] = len(fotos)
+    etapas = status_etapas(v, fotos)
+    d["etapas_feitas"] = sum(1 for e in etapas if e["status"] != "pendente")
+    d["etapas_total"] = len(etapas)
     if completo:
+        d["etapas"] = etapas
         for f in fotos:
             f["url"] = f"/fotos/{v['chave']}/{f['arquivo']}"
         d["fotos"] = fotos
@@ -178,6 +223,12 @@ def apagar_arquivo_foto(chave, arquivo):
     (pasta_fotos(chave) / arquivo).unlink(missing_ok=True)
     for m in MINI_DIR.glob(f"{chave}__*__{arquivo}.jpg"):
         m.unlink(missing_ok=True)
+
+
+def apagar_fotos_etapa(c, v, etapa):
+    for f in c.execute("SELECT * FROM fotos WHERE veiculo_id=? AND etapa=?", (v["id"], etapa)).fetchall():
+        apagar_arquivo_foto(v["chave"], f["arquivo"])
+    c.execute("DELETE FROM fotos WHERE veiculo_id=? AND etapa=?", (v["id"], etapa))
 
 
 def gravar_cadastro(c, v, dados):
@@ -409,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
         raise RotaErro("Rota não encontrada", 404)
 
     def config(self):
-        return {"ok": True, "situacoes": SITUACOES, "tipos": TIPOS}
+        return {"ok": True, "etapas": ETAPAS, "situacoes": SITUACOES, "tipos": TIPOS}
 
     def listar(self):
         q, filtro = norm(self.q.get("q", "")), self.q.get("filtro", "todos")
@@ -452,14 +503,14 @@ class Handler(BaseHTTPRequestHandler):
                "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro",
                "status", "situacao_aparente", "odometro_horimetro", "local_verificado",
                "observacoes", "vistoriador", "matricula", "inicio", "fim",
-               "n_fotos", "origem"]
+               "n_fotos", "etapas_puladas", "origem"]
         linhas = []
         for v in vs:
             linhas.append([v["chave"], v["patrimonio"], v["placa"], v["tipo"], v["marca_modelo"],
                            v["ano"], v["chassi"], v["renavam"], v["secretaria"], v["local_cadastro"],
                            v["responsavel"], v["situacao_cadastro"], v["status"], v["situacao"],
                            v["odometro"], v["local_visto"], v["obs"], v["vistoriador_nome"],
-                           v["vistoriador_matricula"], v["inicio"], v["fim"], v["n_fotos"], v["origem"]])
+                           v["vistoriador_matricula"], v["inicio"], v["fim"], v["n_fotos"], ",".join(v["puladas_lista"]), v["origem"]])
         nome = "frota_" + datetime.now().strftime("%Y%m%d_%H%M") + ".csv"
         self.enviar(csv_bytes(cab, linhas), "text/csv; charset=utf-8", 200,
                     {"Content-Disposition": f'attachment; filename="{nome}"'})
@@ -526,11 +577,31 @@ class Handler(BaseHTTPRequestHandler):
                     sets["inicio"] = agora()
                 c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
                           [*sets.values(), vid])
+            elif acao == "pular":
+                etapa = d.get("etapa")
+                if etapa not in {e["id"] for e in ETAPAS}:
+                    raise RotaErro("Etapa inválida.")
+                lista = set(json.loads(v["puladas"] or "[]")) | {etapa}
+                c.execute("UPDATE veiculos SET puladas=? WHERE id=?", (json.dumps(sorted(lista)), vid))
+            elif acao == "sem_avarias":
+                if c.execute("SELECT 1 FROM fotos WHERE veiculo_id=? AND etapa='avarias'", (vid,)).fetchone():
+                    raise RotaErro("Já existem fotos de avarias para este veículo.")
+                c.execute("UPDATE veiculos SET sem_avarias=1 WHERE id=?", (vid,))
+            elif acao == "refazer_etapa":
+                etapa = d.get("etapa")
+                apagar_fotos_etapa(c, v, etapa)
+                lista = [e for e in json.loads(v["puladas"] or "[]") if e != etapa]
+                c.execute("UPDATE veiculos SET puladas=?, status=CASE WHEN status='concluido' THEN 'em_andamento' ELSE status END, "
+                          "sem_avarias=CASE WHEN ?='avarias' THEN 0 ELSE sem_avarias END WHERE id=?",
+                          (json.dumps(lista), etapa, vid))
             elif acao == "concluir":
                 if not txt(v["situacao"]):
                     raise RotaErro("Informe a situação aparente antes de concluir.")
-                if v["situacao"] != "Não localizado" and not fotos_do_veiculo(c, vid):
-                    raise RotaErro("Tire pelo menos uma foto antes de concluir.")
+                if v["situacao"] != "Não localizado":
+                    faltam = [e["titulo"] for e in status_etapas(v, fotos_do_veiculo(c, vid))
+                              if e["status"] == "pendente"]
+                    if faltam:
+                        raise RotaErro("Faltam etapas: " + "; ".join(faltam))
                 sets = {"status": "concluido", "fim": agora()}
                 if not v["vistoriador_nome"] and u["nome"]:
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
@@ -541,8 +612,9 @@ class Handler(BaseHTTPRequestHandler):
                     apagar_arquivo_foto(v["chave"], f["arquivo"])
                 c.execute("DELETE FROM fotos WHERE veiculo_id=?", (vid,))
                 c.execute("UPDATE veiculos SET status='pendente', situacao=NULL, odometro=NULL, local_visto=NULL, "
-                          "obs=NULL, vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL "
-                          "WHERE id=?", (vid,))
+                          "obs=NULL, "
+                          "vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL, "
+                          "puladas='[]', sem_avarias=0 WHERE id=?", (vid,))
             elif acao == "excluir":
                 pasta = pasta_fotos(v["chave"])
                 if pasta.exists():
@@ -555,21 +627,33 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
 
     def salvar_foto(self):
-        vid = int(self.q.get("id") or 0)
+        vid, etapa = int(self.q.get("id") or 0), self.q.get("etapa", "")
+        idx = next((i for i, e in enumerate(ETAPAS) if e["id"] == etapa), None)
+        if idx is None:
+            raise RotaErro("Etapa inválida.")
         if not self.corpo:
             raise RotaErro("Foto vazia.")
         with conexao() as c:
             v = achar(c, vid)
-            seq = (c.execute("SELECT COALESCE(MAX(seq),0) FROM fotos WHERE veiculo_id=?",
-                             (vid,)).fetchone()[0]) + 1
-            nome = f"foto_{seq:02d}.{tipo_imagem(self.corpo)}"
+            e = ETAPAS[idx]
+            if not e.get("multi"):
+                apagar_fotos_etapa(c, v, etapa)
+            seq = (c.execute("SELECT COALESCE(MAX(seq),0) FROM fotos WHERE veiculo_id=? AND etapa=?",
+                             (vid, etapa)).fetchone()[0]) + 1
+            ext = tipo_imagem(self.corpo)
+            nome = (f"{idx + 1:02d}_{etapa}_{seq:02d}.{ext}" if e.get("multi")
+                    else f"{idx + 1:02d}_{etapa}.{ext}")
             pasta = pasta_fotos(v["chave"])
             pasta.mkdir(parents=True, exist_ok=True)
             (pasta / nome).write_bytes(self.corpo)
-            c.execute("INSERT INTO fotos(veiculo_id, seq, arquivo, legenda, criado_em, usuario) VALUES(?,?,?,?,?,?)",
-                      (vid, seq, nome, txt(self.q.get("legenda")), agora(), txt(self.q.get("vistoriador"))))
-            c.execute("UPDATE veiculos SET status=CASE WHEN status='pendente' THEN 'em_andamento' ELSE status END "
-                      "WHERE id=?", (vid,))
+            c.execute("INSERT INTO fotos(veiculo_id, etapa, seq, arquivo, legenda, criado_em, usuario) "
+                      "VALUES(?,?,?,?,?,?,?)",
+                      (vid, etapa, seq, nome, txt(self.q.get("legenda")), agora(),
+                       txt(self.q.get("vistoriador"))))
+            lista = [x for x in json.loads(v["puladas"] or "[]") if x != etapa]
+            c.execute("UPDATE veiculos SET puladas=?, sem_avarias=CASE WHEN ?='avarias' THEN 0 ELSE sem_avarias END, "
+                      "status=CASE WHEN status='pendente' THEN 'em_andamento' ELSE status END WHERE id=?",
+                      (json.dumps(lista), etapa, vid))
             print(f"   {v['chave']}/{nome} ({len(self.corpo) // 1024} KB)")
             self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
 

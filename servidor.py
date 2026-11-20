@@ -3,6 +3,7 @@ Levantamento da Frota Municipal - Prefeitura de Caratinga
 Servidor local (painel no PC + vistoria no celular).
 
 Uso:        python servidor.py
+Preparação: python servidor.py --preparar   (cria o certificado)
 """
 import csv
 import io
@@ -12,6 +13,8 @@ import re
 import shutil
 import socket
 import sqlite3
+import ssl
+import sys
 import threading
 import time
 import traceback
@@ -19,7 +22,7 @@ import unicodedata
 import webbrowser
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -44,8 +47,10 @@ DADOS = RAIZ / "dados"
 FOTOS_DIR = DADOS / "fotos"
 MINI_DIR = DADOS / "miniaturas"
 EXCL_DIR = DADOS / "excluidos"
+CERT_DIR = DADOS / "certificado"
 DB_PATH = DADOS / "frota.db"
 PORTA_HTTP = 8000
+PORTA_HTTPS = 8443
 LIMITE_UPLOAD = 60 * 1024 * 1024
 
 
@@ -76,6 +81,8 @@ TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ôni
 CAD = ["patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi", "renavam",
        "secretaria", "local_cadastro", "responsavel", "situacao_cadastro"]
 VIST = ["situacao", "odometro", "local_visto", "obs"]
+# O certificado local só vale para estas redes (segurança: não serve para outros sites)
+REDES_PERMITIDAS = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 
 ALIASES = {
     "patrimonio": ["patrimonio", "npatrimonio", "numpatrimonio", "numeropatrimonio",
@@ -132,6 +139,13 @@ def txt(v):
     return "" if v is None else str(v).strip()
 
 
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @contextmanager
 def conexao():
     c = sqlite3.connect(DB_PATH, timeout=20)
@@ -150,7 +164,7 @@ class RotaErro(Exception):
 
 
 def iniciar_banco():
-    for d in (DADOS, FOTOS_DIR, MINI_DIR, EXCL_DIR):
+    for d in (DADOS, FOTOS_DIR, MINI_DIR, EXCL_DIR, CERT_DIR):
         d.mkdir(parents=True, exist_ok=True)
     with conexao() as c:
         c.executescript("""
@@ -163,15 +177,16 @@ def iniciar_banco():
             status TEXT DEFAULT 'pendente', situacao TEXT, odometro TEXT,
             local_visto TEXT, obs TEXT, vistoriador_nome TEXT,
             vistoriador_matricula TEXT, inicio TEXT, fim TEXT,
+            lat REAL, lon REAL, acc REAL,
             puladas TEXT DEFAULT '[]', sem_avarias INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS fotos(
             id INTEGER PRIMARY KEY, veiculo_id INTEGER NOT NULL, etapa TEXT,
             seq INTEGER DEFAULT 1, arquivo TEXT, legenda TEXT,
-            criado_em TEXT, usuario TEXT);
+            lat REAL, lon REAL, acc REAL, criado_em TEXT, usuario TEXT);
         """)
 
 
-# ------------------------------------------------------------------------ rede --
+# ---------------------------------------------------------- rede / certificado --
 def ips_locais():
     ips = set()
     try:
@@ -194,6 +209,99 @@ def ips_locais():
         return 1 if ip.startswith("192.168.") else 2
     ips.sort(key=lambda i: (ordem(i), i))
     return ips or ["192.168.137.1"]
+
+
+def preparar_certificado():
+    """Cria a autoridade certificadora local (uma vez) e o certificado do servidor.
+
+    O celular instala a autoridade UMA vez (arquivo ca.pem) e passa a confiar no
+    endereço https do notebook: sem avisos, com GPS e com modo offline (PWA).
+    Se o IP mudar, só o certificado do servidor é refeito; o celular não precisa
+    instalar nada de novo. Retorna (cert, chave) ou None.
+    """
+    try:
+        import ipaddress
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    except ImportError:
+        return None
+    try:
+        ca_crt, ca_key = CERT_DIR / "ca.pem", CERT_DIR / "ca-chave.pem"
+        cert, chave, lista = CERT_DIR / "cert.pem", CERT_DIR / "chave.pem", CERT_DIR / "ips.json"
+        t0 = datetime.now(timezone.utc)
+        redes = [ipaddress.ip_network(r) for r in REDES_PERMITIDAS]
+        pem = serialization.Encoding.PEM
+
+        if not (ca_crt.exists() and ca_key.exists()):
+            cakey = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            nome = x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, "Autoridade Local - Frota Caratinga"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Prefeitura Municipal de Caratinga")])
+            ca = (x509.CertificateBuilder().subject_name(nome).issuer_name(nome)
+                  .public_key(cakey.public_key()).serial_number(x509.random_serial_number())
+                  .not_valid_before(t0 - timedelta(days=1)).not_valid_after(t0 + timedelta(days=3650))
+                  .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+                  .add_extension(x509.KeyUsage(
+                      digital_signature=False, content_commitment=False, key_encipherment=False,
+                      data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                      crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+                  .add_extension(x509.NameConstraints(
+                      permitted_subtrees=[x509.DNSName("localhost")] +
+                                         [x509.IPAddress(r) for r in redes],
+                      excluded_subtrees=None), critical=True)
+                  .add_extension(x509.SubjectKeyIdentifier.from_public_key(cakey.public_key()),
+                                 critical=False)
+                  .sign(cakey, hashes.SHA256()))
+            ca_key.write_bytes(cakey.private_bytes(
+                pem, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+            ca_crt.write_bytes(ca.public_bytes(pem))
+            for f in (cert, chave, lista):  # certificado antigo deixa de valer
+                f.unlink(missing_ok=True)
+
+        ca_cert = x509.load_pem_x509_certificate(ca_crt.read_bytes())
+        ca_priv = serialization.load_pem_private_key(ca_key.read_bytes(), password=None)
+        ips = [i for i in sorted(set(ips_locais()) | {"127.0.0.1", "192.168.137.1"})
+               if any(ipaddress.ip_address(i) in r for r in redes)]
+
+        valido = False
+        if cert.exists() and chave.exists() and lista.exists():
+            try:
+                info = json.loads(lista.read_text())
+                atual = x509.load_pem_x509_certificate(cert.read_bytes())
+                fim = getattr(atual, "not_valid_after_utc", None) or \
+                    atual.not_valid_after.replace(tzinfo=timezone.utc)
+                valido = (isinstance(info, dict) and set(ips) <= set(info.get("ips", []))
+                          and fim - t0 > timedelta(days=30))
+            except Exception:
+                valido = False
+        if not valido:
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            nome = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Levantamento da Frota - Caratinga")])
+            san = [x509.DNSName("localhost")] + [x509.IPAddress(ipaddress.ip_address(i)) for i in ips]
+            crt = (x509.CertificateBuilder().subject_name(nome).issuer_name(ca_cert.subject)
+                   .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                   .not_valid_before(t0 - timedelta(days=1))
+                   .not_valid_after(t0 + timedelta(days=800))  # iPhone exige no máximo 825 dias
+                   .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                   .add_extension(x509.KeyUsage(
+                       digital_signature=True, content_commitment=False, key_encipherment=True,
+                       data_encipherment=False, key_agreement=False, key_cert_sign=False,
+                       crl_sign=False, encipher_only=False, decipher_only=False), critical=True)
+                   .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+                   .add_extension(x509.SubjectAlternativeName(san), critical=False)
+                   .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_priv.public_key()),
+                                  critical=False)
+                   .sign(ca_priv, hashes.SHA256()))
+            chave.write_bytes(key.private_bytes(
+                pem, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+            cert.write_bytes(crt.public_bytes(pem) + ca_cert.public_bytes(pem))
+            lista.write_text(json.dumps({"ips": ips}))
+        return cert, chave
+    except Exception as e:
+        print(f"  [!] Falha ao preparar o certificado: {e}")
+        return None
 
 
 # ------------------------------------------------------------- regras de dados --
@@ -389,6 +497,12 @@ def tipo_imagem(dados):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    ctx_tls = None
+
+    def setup(self):
+        if self.ctx_tls is not None:  # handshake TLS na thread da conexão
+            self.request = self.ctx_tls.wrap_socket(self.request, server_side=True)
+        super().setup()
 
     def log_message(self, *a):
         pass
@@ -452,7 +566,7 @@ class Handler(BaseHTTPRequestHandler):
             (self.rota_get if metodo == "GET" else self.rota_post)()
         except RotaErro as e:
             self.json({"ok": False, "erro": str(e)}, e.codigo)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
             pass
         except Exception as e:
             traceback.print_exc()
@@ -465,6 +579,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.arquivo(WEB / "painel.html")
         if p in ("/m", "/m/"):
             return self.arquivo(WEB / "celular.html")
+        if p == "/certificado":
+            return self.arquivo(WEB / "certificado.html")
+        if p == "/ca.crt":
+            return self.arquivo(CERT_DIR / "ca.pem", nome_download="Frota-Caratinga-CA.crt",
+                                tipo="application/x-x509-ca-cert")
         if p.startswith("/web/"):
             alvo = (WEB / p[5:]).resolve()
             if WEB.resolve() not in alvo.parents:
@@ -496,9 +615,18 @@ class Handler(BaseHTTPRequestHandler):
         raise RotaErro("Rota não encontrada", 404)
 
     def config(self):
-        urls = [{"ip": ip, "celular": f"http://{ip}:{PORTA_HTTP}/m"} for ip in ips_locais()]
+        urls = []
+        for ip in ips_locais():
+            urls.append({"ip": ip,
+                         "celular": (f"https://{ip}:{PORTA_HTTPS}/m" if HTTPS_ATIVO[0]
+                                     else f"http://{ip}:{PORTA_HTTP}/m"),
+                         "certificado": f"http://{ip}:{PORTA_HTTP}/certificado",
+                         "http": f"http://{ip}:{PORTA_HTTP}/m",
+                         "https": f"https://{ip}:{PORTA_HTTPS}/m" if HTTPS_ATIVO[0] else ""})
         return {"ok": True, "etapas": ETAPAS, "situacoes": SITUACOES, "tipos": TIPOS,
-                "urls": urls, "qr_ok": segno is not None}
+                "https_ativo": HTTPS_ATIVO[0], "urls": urls,
+                "qr_ok": segno is not None,
+                "ca_ok": (CERT_DIR / "ca.pem").exists()}
 
     def listar(self):
         q, filtro = norm(self.q.get("q", "")), self.q.get("filtro", "todos")
@@ -541,14 +669,18 @@ class Handler(BaseHTTPRequestHandler):
                "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro",
                "status", "situacao_aparente", "odometro_horimetro", "local_verificado",
                "observacoes", "vistoriador", "matricula", "inicio", "fim",
-               "n_fotos", "etapas_puladas", "origem"]
+               "latitude", "longitude", "precisao_m", "n_fotos", "etapas_puladas", "origem"]
+
+        def dec(x):
+            return "" if x is None else str(round(x, 7)).replace(".", ",")
         linhas = []
         for v in vs:
             linhas.append([v["chave"], v["patrimonio"], v["placa"], v["tipo"], v["marca_modelo"],
                            v["ano"], v["chassi"], v["renavam"], v["secretaria"], v["local_cadastro"],
                            v["responsavel"], v["situacao_cadastro"], v["status"], v["situacao"],
                            v["odometro"], v["local_visto"], v["obs"], v["vistoriador_nome"],
-                           v["vistoriador_matricula"], v["inicio"], v["fim"], v["n_fotos"], ",".join(v["puladas_lista"]), v["origem"]])
+                           v["vistoriador_matricula"], v["inicio"], v["fim"], dec(v["lat"]),
+                           dec(v["lon"]), dec(v["acc"]), v["n_fotos"], ",".join(v["puladas_lista"]), v["origem"]])
         nome = "frota_" + datetime.now().strftime("%Y%m%d_%H%M") + ".csv"
         self.enviar(csv_bytes(cab, linhas), "text/csv; charset=utf-8", 200,
                     {"Content-Disposition": f'attachment; filename="{nome}"'})
@@ -613,6 +745,8 @@ class Handler(BaseHTTPRequestHandler):
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
                 if not v["inicio"]:
                     sets["inicio"] = agora()
+                if num(d.get("lat")) is not None and num(d.get("lon")) is not None:
+                    sets["lat"], sets["lon"], sets["acc"] = num(d["lat"]), num(d["lon"]), num(d.get("acc"))
                 c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
                           [*sets.values(), vid])
             elif acao == "pular":
@@ -652,7 +786,7 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute("UPDATE veiculos SET status='pendente', situacao=NULL, odometro=NULL, local_visto=NULL, "
                           "obs=NULL, "
                           "vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL, "
-                          "puladas='[]', sem_avarias=0 WHERE id=?", (vid,))
+                          "lat=NULL, lon=NULL, acc=NULL, puladas='[]', sem_avarias=0 WHERE id=?", (vid,))
             elif acao == "excluir":
                 pasta = pasta_fotos(v["chave"])
                 if pasta.exists():
@@ -684,9 +818,10 @@ class Handler(BaseHTTPRequestHandler):
             pasta = pasta_fotos(v["chave"])
             pasta.mkdir(parents=True, exist_ok=True)
             (pasta / nome).write_bytes(self.corpo)
-            c.execute("INSERT INTO fotos(veiculo_id, etapa, seq, arquivo, legenda, criado_em, usuario) "
-                      "VALUES(?,?,?,?,?,?,?)",
-                      (vid, etapa, seq, nome, txt(self.q.get("legenda")), agora(),
+            c.execute("INSERT INTO fotos(veiculo_id, etapa, seq, arquivo, legenda, lat, lon, acc, criado_em, usuario) "
+                      "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (vid, etapa, seq, nome, txt(self.q.get("legenda")), num(self.q.get("lat")),
+                       num(self.q.get("lon")), num(self.q.get("acc")), agora(),
                        txt(self.q.get("vistoriador"))))
             lista = [x for x in json.loads(v["puladas"] or "[]") if x != etapa]
             c.execute("UPDATE veiculos SET puladas=?, sem_avarias=CASE WHEN ?='avarias' THEN 0 ELSE sem_avarias END, "
@@ -712,22 +847,54 @@ class Handler(BaseHTTPRequestHandler):
 
 class Servidor(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 32
+
+    def handle_error(self, request, client_address):
+        pass  # handshakes TLS recusados (aviso de certificado) são normais
+
+
+HTTPS_ATIVO = [False]
 
 
 def principal():
     iniciar_banco()
+    preparar = "--preparar" in sys.argv
     print("=" * 62)
     print("  LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA")
     print("=" * 62)
+    cert = preparar_certificado()
+    if preparar:
+        print("Preparação concluída." if cert else "Preparação concluída com avisos (veja acima).")
+        return
     if segno is None:
         print("  [!] QR Code desativado (instale: pip install segno).")
 
     http = Servidor(("0.0.0.0", PORTA_HTTP), Handler)
     threading.Thread(target=http.serve_forever, daemon=True).start()
 
+    if cert:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert[0]), str(cert[1]))
+
+        class HandlerTLS(Handler):
+            ctx_tls = ctx
+        try:
+            https = Servidor(("0.0.0.0", PORTA_HTTPS), HandlerTLS)
+            threading.Thread(target=https.serve_forever, daemon=True).start()
+            HTTPS_ATIVO[0] = True
+        except OSError as e:
+            print(f"  [!] HTTPS não iniciou (porta {PORTA_HTTPS} ocupada?): {e}")
+    else:
+        print("  [!] HTTPS desativado: instale 'cryptography' (rode instalar.bat). Sem HTTPS o GPS não funciona.")
+
     ip = ips_locais()[0]
     print(f"\n  Painel (neste PC):  http://localhost:{PORTA_HTTP}")
-    print(f"  Celular:            http://{ip}:{PORTA_HTTP}/m")
+    if HTTPS_ATIVO[0]:
+        print(f"  Celular (com GPS):  https://{ip}:{PORTA_HTTPS}/m")
+    else:
+        print(f"  Celular (sem GPS):  http://{ip}:{PORTA_HTTP}/m")
+    if HTTPS_ATIVO[0]:
+        print(f"  1º acesso do celular (instalar certificado, uma vez): http://{ip}:{PORTA_HTTP}/certificado")
     print(f"  Dados salvos em:    {DADOS}")
     print("\n  Deixe esta janela aberta durante o levantamento. Ctrl+C para encerrar.\n")
     threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{PORTA_HTTP}")).start()

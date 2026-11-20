@@ -14,4 +14,5 @@ async function api(url, opts = {}) {
 }
 const post = (url, dados) => api(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dados || {})});
 
+function mapaLink(lat, lon) { return `https://www.google.com/maps?q=${lat},${lon}`; }
 function fmtData(s) { if (!s) return ''; const m = s.match(/(\d+)-(\d+)-(\d+) (\d+:\d+)/); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}` : s; }

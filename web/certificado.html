@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Instalar certificado - Frota Caratinga</title>
+<link rel="stylesheet" href="/web/estilo.css">
+</head>
+<body>
+<div class="pagina">
+  <div><img src="/web/brasao.png" width="80" alt=""><h2>Instalar o certificado no celular</h2>
+  <div>Prefeitura de Caratinga · Levantamento da Frota</div></div>
+
+  <div class="card-i">
+    <b>Para que serve?</b> Faz o celular confiar no notebook da vistoria. Depois de instalado <b>uma única vez</b>:
+    não aparece mais o aviso de “conexão não segura” e o <b>GPS</b> funciona.
+    <br><small>O certificado só vale para endereços de rede local (192.168.x.x, 10.x.x.x etc.); não serve para sites da internet.</small>
+  </div>
+
+  <div class="card-i">
+    <a class="btn" href="/ca.crt"><b>1. Baixar o certificado</b></a>
+  </div>
+
+  <div class="card-i"><b>2. Instalar — Android</b>
+    <ol>
+      <li>Abra <b>Configurações</b> e procure por <b>“certificado”</b> (ou vá em <i>Segurança › Mais configurações de segurança › Criptografia e credenciais</i>).</li>
+      <li>Toque em <b>Instalar um certificado</b> › <b>Certificado de CA</b> › <b>Instalar mesmo assim</b>.</li>
+      <li>Escolha o arquivo <b>Frota-Caratinga-CA.crt</b> (pasta Downloads).</li>
+      <li>O Android avisa que a rede pode ser monitorada: é o aviso padrão para qualquer certificado instalado por você.</li>
+    </ol>
+  </div>
+
+  <div class="card-i"><b>2. Instalar — iPhone</b>
+    <ol>
+      <li>Ao baixar, toque em <b>Permitir</b> (“Este site está tentando baixar um perfil”).</li>
+      <li>Abra <b>Ajustes › Geral › VPN e Gerenciamento de Dispositivo</b>, toque no perfil baixado e em <b>Instalar</b>.</li>
+      <li>Depois vá em <b>Ajustes › Geral › Sobre › Ajustes de Confiança de Certificado</b> e <b>ative</b> a confiança total no certificado “Autoridade Local - Frota Caratinga”.</li>
+    </ol>
+  </div>
+
+  <div class="card-i"><b>3. Abrir o aplicativo</b><br>Volte ao navegador e abra o endereço mostrado no painel do notebook
+    (ou leia o QR Code do painel) e entre com sua matrícula e senha.</div>
+</div>
+</body>
+</html>

@@ -11,6 +11,7 @@
   <img src="/web/brasao.png" alt="">
   <div class="t">Vistoria da Frota<small id="quem"></small></div>
   <div class="dir">
+    <span class="gps" id="gps">GPS...</span>
     <button class="btn sec peq" id="trocar" title="Trocar vistoriador"><i class="fa-solid fa-user-pen"></i> Trocar</button>
   </div>
 </div>
@@ -22,10 +23,29 @@
    Aplicativo do celular: cada ação é enviada na hora para o notebook.
    (Precisa estar conectado ao hotspot do notebook o tempo todo.)
    ===================================================================== */
-let vistoriador = null, cfg = null, v = null, filtro = 'pendente', busca = '';
+let vistoriador = null, cfg = null, pos = null, gpsErro = '', v = null, filtro = 'pendente', busca = '';
 const app = $('#app');
 const tratar = e => alert(e instanceof TypeError ? 'Sem conexão com o notebook.' : e.message);
 
+/* ---------------- GPS ---------------- */
+function iniciarGPS() {
+  if (!window.isSecureContext) { gpsErro = 'GPS: abra pelo https'; return; }
+  if (!navigator.geolocation) { gpsErro = 'Sem suporte a GPS'; return; }
+  navigator.geolocation.watchPosition(
+    p => { pos = {lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, t: Date.now()}; gpsErro = ''; },
+    err => { gpsErro = err.code === 1 ? 'GPS: permissão negada' : 'GPS sem sinal'; },
+    {enableHighAccuracy: true, maximumAge: 5000, timeout: 30000});
+}
+function atualizaGPS() {
+  const el = $('#gps');
+  if (pos && Date.now() - pos.t < 120000) {
+    el.textContent = `GPS ±${Math.round(pos.acc)} m`; el.className = 'gps ' + (pos.acc <= 20 ? 'ok' : pos.acc <= 50 ? 'med' : 'ruim');
+  } else { el.textContent = gpsErro || 'GPS buscando...'; el.className = 'gps'; }
+}
+const gpsParams = () => (pos && Date.now() - pos.t < 120000) ? {lat: pos.lat, lon: pos.lon, acc: pos.acc} : {};
+setInterval(atualizaGPS, 2000);
+
+/* ---------------- início ---------------- */
 /* Quem está vistoriando: nome e matrícula ficam guardados neste celular */
 function telaIdentificacao() {
   app.innerHTML = `<div class="etapa-titulo">Quem está vistoriando?</div>
@@ -43,6 +63,7 @@ function telaIdentificacao() {
 (async () => {
   try { vistoriador = JSON.parse(localStorage.getItem('vistoriador')); } catch (e) {}
   try { cfg = await api('/api/config'); } catch (e) { app.innerHTML = '<div class="aviso verm">Sem conexão com o notebook.</div>'; return; }
+  iniciarGPS(); atualizaGPS();
   if (!vistoriador) return telaIdentificacao();
   $('#quem').textContent = `${vistoriador.nome} · Mat. ${vistoriador.matricula}`;
   telaLista();
@@ -53,7 +74,8 @@ $('#trocar').onclick = telaIdentificacao;
 const quem = () => ({vistoriador_nome: vistoriador.nome, vistoriador_matricula: vistoriador.matricula});
 const acao = async (nome, dados) => { v = (await post(`/api/veiculos/${v.id}/${nome}`, {...dados, ...quem()})).veiculo; return v; };
 async function enviarFoto(etapaId, file, legenda) {
-  const q = new URLSearchParams({id: v.id, etapa: etapaId, legenda: legenda || '', vistoriador: vistoriador.nome});
+  const q = new URLSearchParams({id: v.id, etapa: etapaId, legenda: legenda || '', vistoriador: vistoriador.nome}), g = gpsParams();
+  if (g.lat != null) { q.set('lat', g.lat); q.set('lon', g.lon); q.set('acc', g.acc); }
   v = (await api('/api/foto?' + q, {method: 'POST', headers: {'Content-Type': file.type || 'image/jpeg'}, body: file})).veiculo;
 }
 const srcFoto = (f, w) => `${f.url}?w=${w}`;
@@ -61,8 +83,12 @@ const srcFoto = (f, w) => `${f.url}?w=${w}`;
 /* ---------------- lista ---------------- */
 function telaLista() {
   v = null;
+  let aviso = '';
+  if (!window.isSecureContext) aviso += `<div class="aviso"><i class="fa-solid fa-location-dot"></i> Sem conexão segura: o GPS fica desativado.
+    <a href="/certificado">Instalar o certificado</a></div>`;
   const seg = [['pendente', 'Pendentes'], ['em_andamento', 'Em and.'], ['concluido', 'Feitos'], ['todos', 'Todos']];
-  app.innerHTML = `<input type="text" id="busca" placeholder="Placa (finais), patrimônio, modelo..." value="${esc(busca)}">
+  app.innerHTML = `${aviso}
+    <input type="text" id="busca" placeholder="Placa (finais), patrimônio, modelo..." value="${esc(busca)}">
     <div class="seg">${seg.map(([f, t]) => `<button data-f="${f}" class="${filtro === f ? 'on' : ''}">${t}</button>`).join('')}</div>
     <div id="lista"><div class="dica">Carregando...</div></div>
     <div class="rodape-lista" id="rodape"></div>
@@ -224,7 +250,8 @@ async function telaRevisao() {
   app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
     <div class="etapa-titulo">Revisão · ${esc(v.chave)}</div>
     <div class="dados"><div><span>Situação</span><b>${esc(v.situacao)}</b></div>
-      <div><span>Odômetro/Horímetro</span><b>${esc(v.odometro) || '—'}</b></div></div>
+      <div><span>Odômetro/Horímetro</span><b>${esc(v.odometro) || '—'}</b></div>
+      <div><span>GPS</span><b>${v.lat != null ? '±' + Math.round(v.acc ?? 0) + ' m' : 'não registrado'}</b></div></div>
     ${naoLoc ? '<div class="aviso">Veículo marcado como <b>não localizado</b>. Não é necessário tirar fotos.</div>' : linhas}
     <div id="msg" class="erro"></div>
     <div class="rodape-fixo"><button class="btn verde" id="concluir" ${!naoLoc && faltam.length ? 'disabled' : ''}>

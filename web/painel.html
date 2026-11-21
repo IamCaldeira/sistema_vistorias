@@ -14,7 +14,11 @@
     <small>Secretaria de Administração e Desenvolvimento Econômico · Departamento de Patrimônio</small>
   </div>
   <div class="dir">
+    <span><i class="fa-solid fa-user"></i> <span id="usuario"></span></span>
     <a class="btn peq" href="/m" target="_blank" title="Abre a tela de vistoria (a mesma do celular)"><i class="fa-solid fa-clipboard-check"></i> Vistoriar</a>
+    <button class="btn sec peq so-admin" id="bUsuarios"><i class="fa-solid fa-users-gear"></i> Usuários</button>
+    <button class="btn sec peq" id="bSenha"><i class="fa-solid fa-key"></i> Alterar senha</button>
+    <button class="btn sec peq" id="sair"><i class="fa-solid fa-right-from-bracket"></i> Sair</button>
   </div>
 </header>
 
@@ -36,8 +40,8 @@
       <select id="fstatus"><option value="todos">Todos</option><option value="pendente">Pendentes</option>
         <option value="em_andamento">Em andamento</option><option value="concluido">Concluídos</option></select>
       <div class="esp">
-        <button class="btn" id="bNovo"><i class="fa-solid fa-plus"></i> Novo veículo</button>
-        <button class="btn sec" id="bImp"><i class="fa-solid fa-file-import"></i> Importar planilha</button>
+        <button class="btn so-admin" id="bNovo"><i class="fa-solid fa-plus"></i> Novo veículo</button>
+        <button class="btn sec so-admin" id="bImp"><i class="fa-solid fa-file-import"></i> Importar planilha</button>
         <a class="btn sec" href="/api/exportar.csv"><i class="fa-solid fa-file-export"></i> Exportar CSV</a>
       </div>
     </div>
@@ -73,9 +77,29 @@
   <div class="erro" id="resImp"></div>
   <div class="acoes"><button class="btn" id="goImp"><i class="fa-solid fa-upload"></i> Importar</button></div>
 </div></div>
+<!-- usuários -->
+<div class="modal" id="mUsr"><div class="jan">
+  <h2><i class="fa-solid fa-users-gear"></i> Usuários e perfis
+    <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
+  <div class="tab-wrap"><table class="tab-usr"><thead><tr><th>Nome</th><th>Matrícula</th><th>Perfil</th><th>Situação</th><th>Ações</th></tr></thead>
+    <tbody id="usrBody"></tbody></table></div>
+  <h3><i class="fa-solid fa-user-plus"></i> Novo usuário</h3>
+  <div class="form-linha">
+    <div><label>Nome completo</label><input type="text" id="nuNome"></div>
+    <div><label>Matrícula</label><input type="text" id="nuMat"></div>
+    <div><label>Perfil</label><select id="nuPerfil"><option value="vistoriador">Vistoriador</option><option value="admin">Administrador</option></select></div>
+    <div><label>Senha inicial</label><input type="text" id="nuSenha" placeholder="mín. 4 caracteres"></div>
+    <button class="btn verde" id="nuCriar"><i class="fa-solid fa-plus"></i> Criar</button>
+  </div>
+  <div class="erro" id="usrErro"></div>
+  <div class="leg"><span><b>Administrador:</b> tudo (importar, editar, excluir, usuários).</span>
+    <span><b>Vistoriador:</b> vistoria no celular, consulta no painel e geração de relatórios.</span></div>
+</div></div>
+
 <script src="/web/comum.js"></script>
 <script>
-let cfg = null, filtro = 'todos', busca = '';
+let cfg = null, filtro = 'todos', busca = '', usuario = null;
+const admin = () => usuario && usuario.perfil === 'admin';
 const CAMPOS = [
   ['patrimonio', 'Nº de patrimônio'], ['placa', 'Placa'], ['tipo', 'Tipo', 'tipos'],
   ['ano', 'Ano'], ['marca_modelo', 'Marca / Modelo', null, true], ['chassi', 'Chassi / Nº de série'],
@@ -87,14 +111,18 @@ const modalAberto = () => $$('.modal.aberto').length > 0;
 const fechar = () => { $$('.modal').forEach(m => m.classList.remove('aberto')); carregar(); };
 $$('[data-fechar]').forEach(b => b.onclick = fechar);
 $$('.modal').forEach(m => m.addEventListener('mousedown', e => { if (e.target === m) fechar(); }));
-function tratar(e) { alert(e.message); }
+function tratar(e) { if (e.sessao) { location.reload(); return; } alert(e.message); }
 
-(async () => {
+iniciarSessao(async eu => {
+  usuario = eu;
+  $('#usuario').innerHTML = `${esc(eu.nome)} (Mat. ${esc(eu.matricula)}) <span class="tag-perfil">${eu.perfil === 'admin' ? 'Administrador' : 'Vistoriador'}</span>`;
   await montarQR();
   await carregar();
   setInterval(() => { if (!modalAberto()) carregar().catch(() => {}); }, 8000);
   setInterval(() => montarQR().catch(() => {}), 30000);
-})();
+});
+$('#sair').onclick = sairDoSistema;
+$('#bSenha').onclick = abrirAlterarSenha;
 
 /* ---------- QR code ---------- */
 async function montarQR() {
@@ -123,7 +151,7 @@ $('#qrCertBtn').onclick = () => { const b = $('#qrCert'); b.style.display = b.st
 /* ---------- lista de veículos ---------- */
 async function carregar() {
   try { renderTabela((await api('/api/veiculos?' + new URLSearchParams({q: busca, filtro}))).veiculos); }
-  catch (e) { console.warn(e); }
+  catch (e) { if (e.sessao) location.reload(); }
 }
 function renderTabela(vs) {
   $('#contagem').textContent = `(${vs.length})`;
@@ -187,23 +215,24 @@ function renderDetalhe(v) {
     <div class="fotos">${fotos || '<div class="vazio">Nenhuma foto registrada.</div>'}</div>
     <div class="erro" id="erroDet"></div>
     <div class="acoes">
-      <button class="btn verde" id="dSalvar"><i class="fa-solid fa-floppy-disk"></i> Salvar alterações</button>
+      <button class="btn verde so-admin" id="dSalvar"><i class="fa-solid fa-floppy-disk"></i> Salvar alterações</button>
       <button class="btn" id="dPdf"><i class="fa-solid fa-file-pdf"></i> Gerar relatório PDF</button>
       ${v.pdf ? `<a class="btn sec" target="_blank" href="/relatorios/${v.chave}_relatorio.pdf"><i class="fa-solid fa-eye"></i> Abrir PDF atual</a>` : ''}
       <span></span>
-      <button class="btn sec" id="dReiniciar"><i class="fa-solid fa-rotate-left"></i> Reiniciar vistoria</button>
-      <button class="btn verm" id="dExcluir"><i class="fa-solid fa-trash"></i> Excluir veículo</button>
+      <button class="btn sec so-admin" id="dReiniciar"><i class="fa-solid fa-rotate-left"></i> Reiniciar vistoria</button>
+      <button class="btn verm so-admin" id="dExcluir"><i class="fa-solid fa-trash"></i> Excluir veículo</button>
     </div>`;
+  if (!admin()) $$('#det [data-k]').forEach(el => el.disabled = true);
   $$('#det [data-fechar]').forEach(b => b.onclick = fechar);
   const id = v.id, erro = t => $('#erroDet').textContent = t || '';
   $('#dSalvar').onclick = async () => {
     const d = {}; $$('#det [data-k]').forEach(el => d[el.dataset.k] = el.value);
-    try { const j = await post(`/api/veiculos/${id}/salvar`, d); renderDetalhe(j.veiculo); } catch (e) { erro(e.message); }
+    try { const j = await post(`/api/veiculos/${id}/salvar`, d); renderDetalhe(j.veiculo); } catch (e) { e.sessao ? tratar(e) : erro(e.message); }
   };
   $('#dPdf').onclick = async ev => {
     const b = ev.currentTarget; b.disabled = true; b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando...';
     try { const j = await post(`/api/veiculos/${id}/pdf`); window.open(j.url, '_blank'); const r = await api('/api/veiculos/' + id); renderDetalhe(r.veiculo); }
-    catch (e) { b.disabled = false; b.innerHTML = '<i class="fa-solid fa-file-pdf"></i> Gerar relatório PDF'; erro(e.message); }
+    catch (e) { b.disabled = false; b.innerHTML = '<i class="fa-solid fa-file-pdf"></i> Gerar relatório PDF'; e.sessao ? tratar(e) : erro(e.message); }
   };
   $('#dReiniciar').onclick = async () => {
     if (!confirm('Apagar TODAS as fotos e dados da vistoria deste veículo e voltar para "Pendente"?')) return;
@@ -230,7 +259,7 @@ $('#bNovo').onclick = () => {
 };
 $('#salvarNovo').onclick = async () => {
   const d = {origem: 'painel'}; $$('#formNovo [data-k]').forEach(el => d[el.dataset.k] = el.value);
-  try { await post('/api/veiculos', d); fechar(); } catch (e) { $('#erroNovo').textContent = e.message; }
+  try { await post('/api/veiculos', d); fechar(); } catch (e) { e.sessao ? tratar(e) : $('#erroNovo').textContent = e.message; }
 };
 
 /* ---------- importar ---------- */
@@ -250,6 +279,38 @@ $('#goImp').onclick = async () => {
   } catch (e) { $('#resImp').innerHTML = `<span>${esc(e.message)}</span>`; }
 };
 
+/* ---------- usuários (administrador) ---------- */
+async function abrirUsuarios() {
+  try {
+    const j = await api('/api/usuarios');
+    $('#usrBody').innerHTML = j.usuarios.map(u => `<tr data-id="${u.id}">
+      <td>${esc(u.nome)}</td><td>${esc(u.matricula)}</td>
+      <td>${u.perfil === 'admin' ? '<b>Administrador</b>' : 'Vistoriador'}</td>
+      <td>${u.ativo ? (u.tem_senha ? 'Ativo' : '<span>Sem senha</span>') : '<span>Desativado</span>'}</td>
+      <td>
+        <button class="btn sec peq" data-ua="senha" title="Definir nova senha"><i class="fa-solid fa-key"></i> Senha</button>
+        <button class="btn sec peq" data-ua="perfil" data-p="${u.perfil === 'admin' ? 'vistoriador' : 'admin'}"><i class="fa-solid fa-user-shield"></i> ${u.perfil === 'admin' ? 'Tornar vistoriador' : 'Tornar admin'}</button>
+        <button class="btn sec peq" data-ua="ativo" data-a="${u.ativo ? 0 : 1}"><i class="fa-solid fa-${u.ativo ? 'user-slash' : 'user-check'}"></i> ${u.ativo ? 'Desativar' : 'Ativar'}</button>
+      </td></tr>`).join('');
+    $('#usrErro').textContent = ''; $('#mUsr').classList.add('aberto');
+  } catch (e) { tratar(e); }
+}
+$('#bUsuarios').onclick = abrirUsuarios;
+$('#usrBody').onclick = async ev => {
+  const b = ev.target.closest('[data-ua]'); if (!b) return;
+  const id = b.closest('tr').dataset.id, nome = b.closest('tr').children[0].textContent, acao = b.dataset.ua;
+  let dados = {};
+  if (acao === 'senha') { const s = prompt(`Nova senha para ${nome} (mínimo 4 caracteres):`); if (!s) return; dados = {senha: s}; }
+  else if (acao === 'perfil') { if (!confirm(`Alterar o perfil de ${nome}?`)) return; dados = {perfil: b.dataset.p}; }
+  else { if (!confirm(`${b.dataset.a === '1' ? 'Ativar' : 'Desativar'} ${nome}?`)) return; dados = {ativo: b.dataset.a === '1'}; }
+  try { await post(`/api/usuarios/${id}/${acao}`, dados); abrirUsuarios(); } catch (e) { $('#usrErro').textContent = e.message; }
+};
+$('#nuCriar').onclick = async () => {
+  try {
+    await post('/api/usuarios', {nome: $('#nuNome').value, matricula: $('#nuMat').value, perfil: $('#nuPerfil').value, senha: $('#nuSenha').value});
+    ['#nuNome', '#nuMat', '#nuSenha'].forEach(s => $(s).value = ''); abrirUsuarios();
+  } catch (e) { $('#usrErro').textContent = e.message; }
+};
 </script>
 </body>
 </html>

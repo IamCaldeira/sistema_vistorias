@@ -6,10 +6,13 @@ Uso:        python servidor.py
 Preparação: python servidor.py --preparar   (cria o certificado)
 """
 import csv
+import hashlib
+import hmac
 import io
 import json
 import mimetypes
 import re
+import secrets
 import shutil
 import socket
 import sqlite3
@@ -23,6 +26,7 @@ import webbrowser
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -89,8 +93,10 @@ TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ôni
 CAD = ["patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi", "renavam",
        "secretaria", "local_cadastro", "responsavel", "situacao_cadastro"]
 VIST = ["situacao", "odometro", "local_visto", "obs"]
+PERFIS = ("admin", "vistoriador")
 # O certificado local só vale para estas redes (segurança: não serve para outros sites)
 REDES_PERMITIDAS = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+TENTATIVAS = {}  # matrícula -> (erros, bloqueado_até)
 
 ALIASES = {
     "patrimonio": ["patrimonio", "npatrimonio", "numpatrimonio", "numeropatrimonio",
@@ -133,6 +139,11 @@ def limpar_chave(txt):
     return re.sub(r"[^A-Z0-9]", "", str(txt or "").upper())[:20]
 
 
+def chave_mat(m):
+    """Matrícula só com letras e números, para comparar: '22.222-2' e '222222' são a mesma."""
+    return re.sub(r"[^A-Z0-9]", "", str(m or "").upper())
+
+
 def calcular_chave(placa, patrimonio):
     p = limpar_chave(placa)
     if p in ("", "SEMPLACA", "SP", "NA", "NAO", "NT", "SPLACA"):
@@ -171,11 +182,27 @@ class RotaErro(Exception):
         self.codigo = codigo
 
 
+def hash_senha(senha, salt=None):
+    salt = salt or secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", senha.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
+    return h, salt
+
+
+def confere_senha(senha, h, salt):
+    if not h or not salt:
+        return False
+    return hmac.compare_digest(hash_senha(senha, salt)[0], h)
+
+
 def iniciar_banco():
     for d in (DADOS, FOTOS_DIR, REL_DIR, MINI_DIR, EXCL_DIR, CERT_DIR):
         d.mkdir(parents=True, exist_ok=True)
     with conexao() as c:
         c.executescript("""
+        CREATE TABLE IF NOT EXISTS usuarios(
+            id INTEGER PRIMARY KEY, nome TEXT NOT NULL, matricula TEXT NOT NULL UNIQUE);
+        CREATE TABLE IF NOT EXISTS sessoes(
+            token TEXT PRIMARY KEY, nome TEXT, matricula TEXT, criado TEXT);
         CREATE TABLE IF NOT EXISTS veiculos(
             id INTEGER PRIMARY KEY, chave TEXT NOT NULL UNIQUE,
             patrimonio TEXT, placa TEXT, tipo TEXT, marca_modelo TEXT, ano TEXT,
@@ -192,6 +219,21 @@ def iniciar_banco():
             seq INTEGER DEFAULT 1, arquivo TEXT, legenda TEXT,
             lat REAL, lon REAL, acc REAL, criado_em TEXT, usuario TEXT);
         """)
+        # migração: colunas acrescentadas depois da primeira versão
+        def garantir(tabela, colunas):
+            existentes = {r[1] for r in c.execute(f"PRAGMA table_info({tabela})")}
+            for nome, tipo in colunas:
+                if nome not in existentes:
+                    c.execute(f"ALTER TABLE {tabela} ADD COLUMN {nome} {tipo}")
+        garantir("usuarios", [("senha_hash", "TEXT"), ("salt", "TEXT"),
+                              ("perfil", "TEXT DEFAULT 'vistoriador'"), ("ativo", "INTEGER DEFAULT 1"),
+                              ("matricula_chave", "TEXT")])
+        for r in c.execute("SELECT id, matricula FROM usuarios WHERE matricula_chave IS NULL").fetchall():
+            c.execute("UPDATE usuarios SET matricula_chave=? WHERE id=?", (chave_mat(r["matricula"]), r["id"]))
+        try:
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuarios_matchave ON usuarios(matricula_chave)")
+        except sqlite3.IntegrityError:
+            print("  [!] Há usuários com matrículas equivalentes (ex.: '12.345' e '12345'); ajuste pelo painel.")
 
 
 # ---------------------------------------------------------- rede / certificado --
@@ -405,7 +447,7 @@ def gravar_cadastro(c, v, dados):
         c.execute(f"UPDATE veiculos SET {sets} WHERE id=?", [*novos.values(), v["id"]])
 
 
-def gerar_pdf_veiculo(c, vid):
+def gerar_pdf_veiculo(c, vid, usuario):
     if relatorio is None:
         raise RotaErro("Gerador de PDF indisponível (instale: reportlab e pillow). " + ERRO_RELATORIO)
     v = achar(c, vid)
@@ -522,6 +564,15 @@ def tipo_imagem(dados):
     return "jpg"
 
 
+def admins_ativos(c, excluir_id=0):
+    return c.execute("SELECT COUNT(*) FROM usuarios WHERE perfil='admin' AND ativo=1 "
+                     "AND senha_hash IS NOT NULL AND id<>?", (excluir_id,)).fetchone()[0]
+
+
+def tem_admin(c):
+    return admins_ativos(c) > 0
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     ctx_tls = None
@@ -566,11 +617,38 @@ class Handler(BaseHTTPRequestHandler):
             cab["Content-Disposition"] = f'inline; filename="{inline_nome}"'
         self.enviar(caminho.read_bytes(), tipo, 200, cab)
 
+    # ---- sessão e permissões
+    def sessao(self):
+        ck = SimpleCookie(self.headers.get("Cookie", ""))
+        if "sid" not in ck:
+            return None
+        with conexao() as c:
+            s = c.execute("SELECT u.nome, u.matricula, u.perfil FROM sessoes s "
+                          "JOIN usuarios u ON u.matricula=s.matricula "
+                          "WHERE s.token=? AND u.ativo=1", (ck["sid"].value,)).fetchone()
+        return dict(s) if s else None
+
+    def exigir(self):
+        if not self.usuario:
+            raise RotaErro("Faça login para continuar.", 401)
+        return self.usuario
+
+    def exigir_admin(self):
+        u = self.exigir()
+        if u["perfil"] != "admin":
+            raise RotaErro("Apenas o administrador pode fazer isso.", 403)
+        return u
+
     def corpo_json(self):
         try:
             return json.loads(self.corpo.decode("utf-8") or "{}")
         except ValueError:
             raise RotaErro("Dados inválidos.")
+
+    def abrir_sessao(self, c, nome, mat):
+        token = secrets.token_hex(24)
+        c.execute("INSERT INTO sessoes VALUES(?,?,?,?)", (token, nome, mat, agora()))
+        return {"Set-Cookie": f"sid={token}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"}
 
     # ---- despacho
     def do_GET(self):
@@ -590,6 +668,7 @@ class Handler(BaseHTTPRequestHandler):
                 if n > LIMITE_UPLOAD:
                     raise RotaErro("Arquivo grande demais.", 413)
                 self.corpo = self.rfile.read(n)
+            self.usuario = self.sessao()
             (self.rota_get if metodo == "GET" else self.rota_post)()
         except RotaErro as e:
             self.json({"ok": False, "erro": str(e)}, e.codigo)
@@ -617,8 +696,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise RotaErro("Não permitido", 403)
             return self.arquivo(alvo)
         if p.startswith("/fotos/"):
+            self.exigir()
             return self.servir_foto(p)
         if p.startswith("/relatorios/"):
+            self.exigir()
             nome = p.split("/", 2)[2]
             if not re.fullmatch(r"[\w.\-]+\.pdf", nome):
                 raise RotaErro("Não permitido", 403)
@@ -629,14 +710,27 @@ class Handler(BaseHTTPRequestHandler):
             buf = io.BytesIO()
             segno.make(self.q.get("url", ""), error="m").save(buf, kind="svg", scale=6, border=2)
             return self.enviar(buf.getvalue(), "image/svg+xml")
+        if p == "/api/login_info":
+            with conexao() as c:
+                return self.json({"ok": True, "precisa_admin": not tem_admin(c)})
+        if p == "/api/eu":
+            u = self.exigir()
+            return self.json({"ok": True, "usuario": u})
         if p == "/api/config":
             return self.json(self.config())
+        self.exigir()
         if p == "/api/veiculos":
             return self.json({"ok": True, "veiculos": self.listar()})
         m = re.fullmatch(r"/api/veiculos/(\d+)", p)
         if m:
             with conexao() as c:
                 return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, int(m[1])), True)})
+        if p == "/api/usuarios":
+            self.exigir_admin()
+            with conexao() as c:
+                rows = c.execute("SELECT id, nome, matricula, perfil, ativo, (senha_hash IS NOT NULL) AS tem_senha "
+                                 "FROM usuarios ORDER BY nome").fetchall()
+            return self.json({"ok": True, "usuarios": [dict(r) for r in rows]})
         if p == "/api/modelo.csv":
             corpo = csv_bytes(["Patrimonio", "Placa", "Tipo", "Marca/Modelo", "Ano", "Chassi/Serie",
                                "Renavam", "Secretaria", "Local", "Responsavel", "Situacao"], [])
@@ -720,26 +814,161 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST
     def rota_post(self):
         p = self.caminho
+        if p == "/api/login":
+            return self.login()
+        if p == "/api/setup":
+            return self.setup_admin()
+        if p == "/api/logout":
+            ck = SimpleCookie(self.headers.get("Cookie", ""))
+            if "sid" in ck:
+                with conexao() as c:
+                    c.execute("DELETE FROM sessoes WHERE token=?", (ck["sid"].value,))
+            return self.json({"ok": True})
+        u = self.exigir()
+        if p == "/api/minha_senha":
+            return self.minha_senha(u)
         if p == "/api/foto":
-            return self.salvar_foto()
+            return self.salvar_foto(u)
         if p == "/api/importar":
+            self.exigir_admin()
             nome = self.q.get("nome", "planilha.csv")
             with conexao() as c:
                 return self.json({"ok": True, **importar(c, nome, self.corpo)})
+        if p == "/api/usuarios":
+            self.exigir_admin()
+            return self.criar_usuario()
+        m = re.fullmatch(r"/api/usuarios/(\d+)/(\w+)", p)
+        if m:
+            return self.acao_usuario(int(m[1]), m[2], self.exigir_admin())
         if p == "/api/veiculos":
-            return self.criar_veiculo()
+            return self.criar_veiculo(u)
         m = re.fullmatch(r"/api/foto/(\d+)/(apagar|legenda)", p)
         if m:
             return self.acao_foto(int(m[1]), m[2])
         m = re.fullmatch(r"/api/veiculos/(\d+)/(\w+)", p)
         if m:
-            return self.acao_veiculo(int(m[1]), m[2])
+            return self.acao_veiculo(int(m[1]), m[2], u)
         raise RotaErro("Rota não encontrada", 404)
 
+    # ---- login, usuários, perfis
+    def login(self):
+        d = self.corpo_json()
+        mat, senha = chave_mat(d.get("matricula")), str(d.get("senha") or "")
+        t = TENTATIVAS.get(mat)
+        if t and t[1] > time.time():
+            raise RotaErro(f"Muitas tentativas erradas. Aguarde {int((t[1] - time.time()) // 60) + 1} minuto(s).", 429)
+        with conexao() as c:
+            u = c.execute("SELECT * FROM usuarios WHERE matricula_chave=?", (mat,)).fetchone()
+            if u and u["ativo"] and not u["senha_hash"]:
+                raise RotaErro("Este usuário ainda não tem senha. Peça ao administrador para definir uma.")
+            if not u or not u["ativo"] or not confere_senha(senha, u["senha_hash"], u["salt"]):
+                n = (t[0] if t else 0) + 1
+                TENTATIVAS[mat] = (n, time.time() + 300 if n >= 5 else 0)
+                raise RotaErro("Matrícula ou senha incorretos.")
+            TENTATIVAS.pop(mat, None)
+            cab = self.abrir_sessao(c, u["nome"], u["matricula"])
+        self.json({"ok": True, "usuario": {"nome": u["nome"], "matricula": u["matricula"],
+                                           "perfil": u["perfil"]}}, 200, cab)
+
+    def setup_admin(self):
+        d = self.corpo_json()
+        nome, mat, senha = " ".join(txt(d.get("nome")).split()), txt(d.get("matricula")), str(d.get("senha") or "")
+        with conexao() as c:
+            if tem_admin(c):
+                raise RotaErro("O sistema já tem administrador. Entre com sua matrícula e senha.", 403)
+            if len(nome) < 3 or not chave_mat(mat) or len(senha) < 4:
+                raise RotaErro("Informe nome completo, matrícula e uma senha de pelo menos 4 caracteres.")
+            h, salt = hash_senha(senha)
+            ex = c.execute("SELECT id FROM usuarios WHERE matricula_chave=?", (chave_mat(mat),)).fetchone()
+            if ex:
+                c.execute("UPDATE usuarios SET nome=?, matricula=?, senha_hash=?, salt=?, perfil='admin', ativo=1 WHERE id=?",
+                          (nome, mat, h, salt, ex["id"]))
+            else:
+                c.execute("INSERT INTO usuarios(nome, matricula, matricula_chave, senha_hash, salt, perfil, ativo) "
+                          "VALUES(?,?,?,?,?,'admin',1)", (nome, mat, chave_mat(mat), h, salt))
+            c.execute("DELETE FROM sessoes")  # sessões do sistema antigo (sem senha) deixam de valer
+            cab = self.abrir_sessao(c, nome, mat)
+        self.json({"ok": True, "usuario": {"nome": nome, "matricula": mat, "perfil": "admin"}}, 200, cab)
+
+    def minha_senha(self, u):
+        d = self.corpo_json()
+        atual, nova = str(d.get("atual") or ""), str(d.get("nova") or "")
+        if len(nova) < 4:
+            raise RotaErro("A nova senha precisa ter pelo menos 4 caracteres.")
+        with conexao() as c:
+            r = c.execute("SELECT * FROM usuarios WHERE matricula=?", (u["matricula"],)).fetchone()
+            if not confere_senha(atual, r["senha_hash"], r["salt"]):
+                raise RotaErro("A senha atual está incorreta.")
+            h, salt = hash_senha(nova)
+            c.execute("UPDATE usuarios SET senha_hash=?, salt=? WHERE id=?", (h, salt, r["id"]))
+        self.json({"ok": True})
+
+    def criar_usuario(self):
+        d = self.corpo_json()
+        nome, mat = " ".join(txt(d.get("nome")).split()), txt(d.get("matricula"))
+        perfil, senha = txt(d.get("perfil")) or "vistoriador", str(d.get("senha") or "")
+        if len(nome) < 3 or not chave_mat(mat):
+            raise RotaErro("Informe nome completo e matrícula.")
+        if perfil not in PERFIS:
+            raise RotaErro("Perfil inválido.")
+        if len(senha) < 4:
+            raise RotaErro("A senha precisa ter pelo menos 4 caracteres.")
+        with conexao() as c:
+            if c.execute("SELECT 1 FROM usuarios WHERE matricula_chave=?", (chave_mat(mat),)).fetchone():
+                raise RotaErro("Já existe um usuário com essa matrícula (use 'Redefinir senha').")
+            h, salt = hash_senha(senha)
+            c.execute("INSERT INTO usuarios(nome, matricula, matricula_chave, senha_hash, salt, perfil, ativo) "
+                      "VALUES(?,?,?,?,?,?,1)", (nome, mat, chave_mat(mat), h, salt, perfil))
+        self.json({"ok": True})
+
+    def acao_usuario(self, uid, acao, eu):
+        d = self.corpo_json()
+        with conexao() as c:
+            alvo = c.execute("SELECT * FROM usuarios WHERE id=?", (uid,)).fetchone()
+            if not alvo:
+                raise RotaErro("Usuário não encontrado", 404)
+            proprio = alvo["matricula"] == eu["matricula"]
+            if acao == "senha":
+                s = str(d.get("senha") or "")
+                if len(s) < 4:
+                    raise RotaErro("A senha precisa ter pelo menos 4 caracteres.")
+                h, salt = hash_senha(s)
+                c.execute("UPDATE usuarios SET senha_hash=?, salt=? WHERE id=?", (h, salt, uid))
+                if not proprio:
+                    c.execute("DELETE FROM sessoes WHERE matricula=?", (alvo["matricula"],))
+            elif acao == "perfil":
+                p = txt(d.get("perfil"))
+                if p not in PERFIS:
+                    raise RotaErro("Perfil inválido.")
+                if proprio:
+                    raise RotaErro("Você não pode alterar o seu próprio perfil.")
+                if alvo["perfil"] == "admin" and p != "admin" and admins_ativos(c, uid) == 0:
+                    raise RotaErro("O sistema precisa de pelo menos um administrador.")
+                c.execute("UPDATE usuarios SET perfil=? WHERE id=?", (p, uid))
+            elif acao == "ativo":
+                ativo = 1 if d.get("ativo") else 0
+                if proprio:
+                    raise RotaErro("Você não pode desativar o seu próprio usuário.")
+                if not ativo and alvo["perfil"] == "admin" and admins_ativos(c, uid) == 0:
+                    raise RotaErro("O sistema precisa de pelo menos um administrador ativo.")
+                c.execute("UPDATE usuarios SET ativo=? WHERE id=?", (ativo, uid))
+                if not ativo:
+                    c.execute("DELETE FROM sessoes WHERE matricula=?", (alvo["matricula"],))
+            elif acao == "nome":
+                nome = " ".join(txt(d.get("nome")).split())
+                if len(nome) < 3:
+                    raise RotaErro("Informe o nome completo.")
+                c.execute("UPDATE usuarios SET nome=? WHERE id=?", (nome, uid))
+            else:
+                raise RotaErro("Ação inválida.", 404)
+        self.json({"ok": True})
+
     # ---- veículos
-    def criar_veiculo(self):
+    def criar_veiculo(self, u):
         d = self.corpo_json()
         origem = "campo" if d.get("origem") == "campo" else "painel"
+        if origem != "campo":
+            self.exigir_admin()
         chave = calcular_chave(d.get("placa"), d.get("patrimonio"))
         if not chave:
             raise RotaErro("Informe a placa ou o número de patrimônio.")
@@ -753,10 +982,10 @@ class Handler(BaseHTTPRequestHandler):
             vid = cur.lastrowid
         self.json({"ok": True, "id": vid, "chave": chave})
 
-    def acao_veiculo(self, vid, acao):
+    def acao_veiculo(self, vid, acao, u):
         d = self.corpo_json() if self.corpo else {}
-        # quem está vistoriando: nome e matrícula digitados no celular
-        u = {"nome": txt(d.get("vistoriador_nome")), "matricula": txt(d.get("vistoriador_matricula"))}
+        if acao in ("salvar", "excluir") and u["perfil"] != "admin":
+            raise RotaErro("Apenas o administrador pode fazer isso.", 403)
         with conexao() as c:
             v = achar(c, vid)
             if acao == "salvar":
@@ -773,7 +1002,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise RotaErro("Informe a situação aparente do veículo.")
                 sets = {k: txt(d.get(k)) for k in VIST}
                 sets["status"] = "em_andamento" if v["status"] != "concluido" else v["status"]
-                if u["nome"] and (v["status"] == "pendente" or not v["vistoriador_nome"]):
+                if v["status"] == "pendente" or not v["vistoriador_nome"]:
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
                 if not v["inicio"]:
                     sets["inicio"] = agora()
@@ -807,19 +1036,19 @@ class Handler(BaseHTTPRequestHandler):
                     if faltam:
                         raise RotaErro("Faltam etapas: " + "; ".join(faltam))
                 sets = {"status": "concluido", "fim": agora()}
-                if not v["vistoriador_nome"] and u["nome"]:
+                if not v["vistoriador_nome"]:
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
                 c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
                           [*sets.values(), vid])
                 c.commit()
                 try:
-                    gerar_pdf_veiculo(c, vid)
+                    gerar_pdf_veiculo(c, vid, u)
                     return self.json({"ok": True, "pdf": f"/relatorios/{achar(c, vid)['chave']}_relatorio.pdf"})
                 except Exception as e:
                     traceback.print_exc()
                     return self.json({"ok": True, "pdf": None, "pdf_erro": str(e)})
             elif acao == "pdf":
-                gerar_pdf_veiculo(c, vid)
+                gerar_pdf_veiculo(c, vid, u)
                 return self.json({"ok": True, "url": f"/relatorios/{achar(c, vid)['chave']}_relatorio.pdf"
                                   f"?t={int(time.time())}"})
             elif acao == "reiniciar":
@@ -842,7 +1071,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise RotaErro("Ação inválida.", 404)
             return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
 
-    def salvar_foto(self):
+    def salvar_foto(self, u):
         vid, etapa = int(self.q.get("id") or 0), self.q.get("etapa", "")
         idx = next((i for i, e in enumerate(ETAPAS) if e["id"] == etapa), None)
         if idx is None:
@@ -866,12 +1095,12 @@ class Handler(BaseHTTPRequestHandler):
                       "VALUES(?,?,?,?,?,?,?,?,?,?)",
                       (vid, etapa, seq, nome, txt(self.q.get("legenda")), num(self.q.get("lat")),
                        num(self.q.get("lon")), num(self.q.get("acc")), agora(),
-                       txt(self.q.get("vistoriador"))))
+                       u["nome"]))
             lista = [x for x in json.loads(v["puladas"] or "[]") if x != etapa]
             c.execute("UPDATE veiculos SET puladas=?, sem_avarias=CASE WHEN ?='avarias' THEN 0 ELSE sem_avarias END, "
                       "status=CASE WHEN status='pendente' THEN 'em_andamento' ELSE status END WHERE id=?",
                       (json.dumps(lista), etapa, vid))
-            print(f"   {v['chave']}/{nome} ({len(self.corpo) // 1024} KB)")
+            print(f"   {v['chave']}/{nome} ({len(self.corpo) // 1024} KB) - {u['nome']}")
             self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
 
     def acao_foto(self, fid, acao):
@@ -942,6 +1171,9 @@ def principal():
     if HTTPS_ATIVO[0]:
         print(f"  1º acesso do celular (instalar certificado, uma vez): http://{ip}:{PORTA_HTTP}/certificado")
     print(f"  Dados salvos em:    {DADOS}")
+    with conexao() as c:
+        if not tem_admin(c):
+            print("\n  >> PRIMEIRO USO: no painel, crie o usuário ADMINISTRADOR (nome, matrícula e senha).")
     print("\n  Deixe esta janela aberta durante o levantamento. Ctrl+C para encerrar.\n")
     threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{PORTA_HTTP}")).start()
     try:

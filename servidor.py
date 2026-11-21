@@ -28,6 +28,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 try:
+    import relatorio
+except Exception as _e:  # reportlab/Pillow ausentes
+    relatorio = None
+    ERRO_RELATORIO = str(_e)
+else:
+    ERRO_RELATORIO = ""
+try:
     import segno
 except ImportError:
     segno = None
@@ -45,6 +52,7 @@ RAIZ = Path(__file__).resolve().parent
 WEB = RAIZ / "web"
 DADOS = RAIZ / "dados"
 FOTOS_DIR = DADOS / "fotos"
+REL_DIR = DADOS / "relatorios"
 MINI_DIR = DADOS / "miniaturas"
 EXCL_DIR = DADOS / "excluidos"
 CERT_DIR = DADOS / "certificado"
@@ -164,7 +172,7 @@ class RotaErro(Exception):
 
 
 def iniciar_banco():
-    for d in (DADOS, FOTOS_DIR, MINI_DIR, EXCL_DIR, CERT_DIR):
+    for d in (DADOS, FOTOS_DIR, REL_DIR, MINI_DIR, EXCL_DIR, CERT_DIR):
         d.mkdir(parents=True, exist_ok=True)
     with conexao() as c:
         c.executescript("""
@@ -338,12 +346,17 @@ def veiculo_dict(c, v, completo=False):
     etapas = status_etapas(v, fotos)
     d["etapas_feitas"] = sum(1 for e in etapas if e["status"] != "pendente")
     d["etapas_total"] = len(etapas)
+    d["pdf"] = pdf_path(v["chave"]).exists()
     if completo:
         d["etapas"] = etapas
         for f in fotos:
             f["url"] = f"/fotos/{v['chave']}/{f['arquivo']}"
         d["fotos"] = fotos
     return d
+
+
+def pdf_path(chave):
+    return REL_DIR / f"{chave}_relatorio.pdf"
 
 
 def pasta_fotos(chave):
@@ -383,10 +396,24 @@ def gravar_cadastro(c, v, dados):
         antiga, nova = pasta_fotos(v["chave"]), pasta_fotos(chave)
         if antiga.exists() and not nova.exists():
             antiga.rename(nova)
+        old_pdf = pdf_path(v["chave"])
+        if old_pdf.exists():
+            old_pdf.unlink()
         novos["chave"] = chave
     if novos:
         sets = ", ".join(f"{k}=?" for k in novos)
         c.execute(f"UPDATE veiculos SET {sets} WHERE id=?", [*novos.values(), v["id"]])
+
+
+def gerar_pdf_veiculo(c, vid):
+    if relatorio is None:
+        raise RotaErro("Gerador de PDF indisponível (instale: reportlab e pillow). " + ERRO_RELATORIO)
+    v = achar(c, vid)
+    d = veiculo_dict(c, v)
+    fotos = fotos_do_veiculo(c, vid)
+    destino = pdf_path(v["chave"])
+    relatorio.gerar_relatorio_veiculo(d, fotos, ETAPAS, pasta_fotos(v["chave"]), destino)
+    return destino
 
 
 # --------------------------------------------------------------- importação ----
@@ -591,6 +618,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.arquivo(alvo)
         if p.startswith("/fotos/"):
             return self.servir_foto(p)
+        if p.startswith("/relatorios/"):
+            nome = p.split("/", 2)[2]
+            if not re.fullmatch(r"[\w.\-]+\.pdf", nome):
+                raise RotaErro("Não permitido", 403)
+            return self.arquivo(REL_DIR / nome, inline_nome=nome)
         if p == "/qr.svg":
             if segno is None:
                 raise RotaErro("QR Code indisponível (instale: pip install segno)", 501)
@@ -624,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
                          "http": f"http://{ip}:{PORTA_HTTP}/m",
                          "https": f"https://{ip}:{PORTA_HTTPS}/m" if HTTPS_ATIVO[0] else ""})
         return {"ok": True, "etapas": ETAPAS, "situacoes": SITUACOES, "tipos": TIPOS,
-                "https_ativo": HTTPS_ATIVO[0], "urls": urls,
+                "https_ativo": HTTPS_ATIVO[0], "urls": urls, "pdf_ok": relatorio is not None,
                 "qr_ok": segno is not None,
                 "ca_ok": (CERT_DIR / "ca.pem").exists()}
 
@@ -779,6 +811,17 @@ class Handler(BaseHTTPRequestHandler):
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
                 c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
                           [*sets.values(), vid])
+                c.commit()
+                try:
+                    gerar_pdf_veiculo(c, vid)
+                    return self.json({"ok": True, "pdf": f"/relatorios/{achar(c, vid)['chave']}_relatorio.pdf"})
+                except Exception as e:
+                    traceback.print_exc()
+                    return self.json({"ok": True, "pdf": None, "pdf_erro": str(e)})
+            elif acao == "pdf":
+                gerar_pdf_veiculo(c, vid)
+                return self.json({"ok": True, "url": f"/relatorios/{achar(c, vid)['chave']}_relatorio.pdf"
+                                  f"?t={int(time.time())}"})
             elif acao == "reiniciar":
                 for f in c.execute("SELECT * FROM fotos WHERE veiculo_id=?", (vid,)).fetchall():
                     apagar_arquivo_foto(v["chave"], f["arquivo"])
@@ -787,6 +830,7 @@ class Handler(BaseHTTPRequestHandler):
                           "obs=NULL, "
                           "vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL, "
                           "lat=NULL, lon=NULL, acc=NULL, puladas='[]', sem_avarias=0 WHERE id=?", (vid,))
+                pdf_path(v["chave"]).unlink(missing_ok=True)
             elif acao == "excluir":
                 pasta = pasta_fotos(v["chave"])
                 if pasta.exists():
@@ -866,6 +910,8 @@ def principal():
     if preparar:
         print("Preparação concluída." if cert else "Preparação concluída com avisos (veja acima).")
         return
+    if relatorio is None:
+        print(f"  [!] PDF desativado: {ERRO_RELATORIO}\n      Rode instalar.bat (precisa de internet).")
     if segno is None:
         print("  [!] QR Code desativado (instale: pip install segno).")
 

@@ -7,7 +7,7 @@ echo  INSTALACAO UNICA (o notebook precisa estar com INTERNET agora)
 echo ================================================================
 echo.
 echo [1/3] Instalando bibliotecas obrigatorias...
-python -m pip install --upgrade pillow segno cryptography
+python -m pip install --upgrade reportlab pillow segno cryptography
 echo.
 echo [2/3] Instalando bibliotecas opcionais (podem falhar sem problema)...
 python -m pip install openpyxl

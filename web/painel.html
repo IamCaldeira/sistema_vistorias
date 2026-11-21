@@ -44,7 +44,7 @@
     <div class="tab-wrap">
       <table>
         <thead><tr><th>Identificação</th><th>Patrimônio</th><th>Tipo</th><th>Marca / Modelo</th><th>Chassi</th><th>Renavam</th><th>Secretaria</th>
-          <th>Status</th><th>Situação</th><th>Etapas</th><th>Vistoriador</th></tr></thead>
+          <th>Status</th><th>Situação</th><th>Etapas</th><th>Vistoriador</th><th>PDF</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
@@ -131,8 +131,9 @@ function renderTabela(vs) {
     <td><b>${esc(v.chave)}</b></td><td>${esc(v.patrimonio)}</td><td>${esc(v.tipo)}</td>
     <td>${esc(v.marca_modelo)}</td><td>${esc(v.chassi)}</td><td>${esc(v.renavam)}</td><td>${esc(v.secretaria)}</td><td>${badge(v.status)}</td>
     <td>${esc(v.situacao)}</td><td>${v.status === 'pendente' ? '' : v.etapas_feitas + '/' + v.etapas_total + ' · ' + v.n_fotos + ' fotos'}</td>
-    <td>${esc(v.vistoriador_nome)}</td></tr>`).join('')
-    : '<tr><td colspan="11" class="vazio">Nenhum veículo encontrado.</td></tr>';
+    <td>${esc(v.vistoriador_nome)}</td>
+    <td>${v.pdf ? `<a href="/relatorios/${v.chave}_relatorio.pdf" target="_blank" onclick="event.stopPropagation()"><i class="fa-solid fa-file-pdf"></i></a>` : ''}</td></tr>`).join('')
+    : '<tr><td colspan="12" class="vazio">Nenhum veículo encontrado.</td></tr>';
   $$('#tbody tr[data-id]').forEach(tr => tr.onclick = () => abrirDetalhe(+tr.dataset.id));
 }
 let deb; $('#busca').oninput = e => { clearTimeout(deb); deb = setTimeout(() => { busca = e.target.value; carregar(); }, 250); };
@@ -187,6 +188,8 @@ function renderDetalhe(v) {
     <div class="erro" id="erroDet"></div>
     <div class="acoes">
       <button class="btn verde" id="dSalvar"><i class="fa-solid fa-floppy-disk"></i> Salvar alterações</button>
+      <button class="btn" id="dPdf"><i class="fa-solid fa-file-pdf"></i> Gerar relatório PDF</button>
+      ${v.pdf ? `<a class="btn sec" target="_blank" href="/relatorios/${v.chave}_relatorio.pdf"><i class="fa-solid fa-eye"></i> Abrir PDF atual</a>` : ''}
       <span></span>
       <button class="btn sec" id="dReiniciar"><i class="fa-solid fa-rotate-left"></i> Reiniciar vistoria</button>
       <button class="btn verm" id="dExcluir"><i class="fa-solid fa-trash"></i> Excluir veículo</button>
@@ -196,6 +199,11 @@ function renderDetalhe(v) {
   $('#dSalvar').onclick = async () => {
     const d = {}; $$('#det [data-k]').forEach(el => d[el.dataset.k] = el.value);
     try { const j = await post(`/api/veiculos/${id}/salvar`, d); renderDetalhe(j.veiculo); } catch (e) { erro(e.message); }
+  };
+  $('#dPdf').onclick = async ev => {
+    const b = ev.currentTarget; b.disabled = true; b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando...';
+    try { const j = await post(`/api/veiculos/${id}/pdf`); window.open(j.url, '_blank'); const r = await api('/api/veiculos/' + id); renderDetalhe(r.veiculo); }
+    catch (e) { b.disabled = false; b.innerHTML = '<i class="fa-solid fa-file-pdf"></i> Gerar relatório PDF'; erro(e.message); }
   };
   $('#dReiniciar').onclick = async () => {
     if (!confirm('Apagar TODAS as fotos e dados da vistoria deste veículo e voltar para "Pendente"?')) return;

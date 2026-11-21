@@ -128,7 +128,8 @@ async function telaVeiculo(id) {
   let topo = '';
   if (v.status === 'concluido')
     topo = `<div class="aviso"><i class="fa-solid fa-circle-check"></i>
-      Vistoria concluída por <b>${esc(v.vistoriador_nome)}</b> em ${fmtData(v.fim)}.</div>
+      Vistoria concluída por <b>${esc(v.vistoriador_nome)}</b> em ${fmtData(v.fim)}.
+      ${v.pdf ? `<br><a href="/relatorios/${v.chave}_relatorio.pdf" target="_blank">Abrir relatório PDF</a>` : ''}</div>
       <button class="btn cinza" id="verRev"><i class="fa-solid fa-images"></i> Ver revisão das fotos</button>
       <button class="btn verm" id="refazer"><i class="fa-solid fa-rotate-left"></i> Refazer vistoria inteira</button>`;
   else if (v.status === 'em_andamento')
@@ -255,7 +256,7 @@ async function telaRevisao() {
     ${naoLoc ? '<div class="aviso">Veículo marcado como <b>não localizado</b>. Não é necessário tirar fotos.</div>' : linhas}
     <div id="msg" class="erro"></div>
     <div class="rodape-fixo"><button class="btn verde" id="concluir" ${!naoLoc && faltam.length ? 'disabled' : ''}>
-      <i class="fa-solid fa-file-circle-check"></i> ${!naoLoc && faltam.length ? 'Faltam ' + faltam.length + ' etapa(s)' : 'Concluir vistoria'}</button></div>`;
+      <i class="fa-solid fa-file-circle-check"></i> ${!naoLoc && faltam.length ? 'Faltam ' + faltam.length + ' etapa(s)' : 'Concluir e gerar relatório'}</button></div>`;
   $('#voltar').onclick = telaLista;
   $$('[data-ir]').forEach(b => b.onclick = async () => {
     const i = +b.dataset.ir, e = v.etapas[i];
@@ -267,9 +268,11 @@ async function telaRevisao() {
     catch (er) { b.disabled = false; $('#msg').textContent = er.message; }
   };
 }
-function telaFim() {
+function telaFim(res) {
+  const bloco = res.pdf ? `<a class="btn cinza" href="${res.pdf}" target="_blank"><i class="fa-solid fa-file-pdf"></i> Abrir relatório PDF</a>`
+    : `<div class="aviso">Vistoria salva, mas o PDF não foi gerado: ${esc(res.pdf_erro)}<br>Gere pelo painel.</div>`;
   app.innerHTML = `<div class="grande"><i class="fa-solid fa-circle-check"></i><br>Vistoria concluída!</div>
-    <div class="dica">${esc(v.chave)}</div>
+    <div class="dica">${esc(v.chave)}</div>${bloco}
     <button class="btn verde" id="prox"><i class="fa-solid fa-arrow-right"></i> Próximo veículo</button>`;
   $('#prox').onclick = telaLista;
 }

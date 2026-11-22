@@ -53,6 +53,26 @@
   </div>
 
   <section class="caixa">
+    <h3><i class="fa-solid fa-map-location-dot"></i> Mapa das vistorias
+      <button class="btn sec peq" id="bMapa"><i class="fa-solid fa-eye"></i> Mostrar mapa</button>
+      <span id="mapaConta"></span></h3>
+    <div id="mapaBox" style="display:none">
+      <div class="mapa-wrap" id="mapa">
+        <div id="mapaTiles"></div><div class="pinos" id="mapaPinos"></div>
+        <div class="mapa-ctl"><button id="mMais" title="Aproximar">+</button><button id="mMenos" title="Afastar">−</button>
+          <button id="mAjusta" title="Ajustar a todos os pontos">⤢</button></div>
+        <div class="mapa-aviso" id="mapaAviso"><i class="fa-solid fa-wifi"></i> Sem internet no notebook: o fundo do mapa não carrega, mas os pontos continuam posicionados.</div>
+        <div class="mapa-attr">© OpenStreetMap</div>
+      </div>
+      <div class="mapa-leg">
+        <span><i></i>Concluído</span><span><i></i>Em andamento</span>
+        <span><i></i>GPS impreciso (&gt; 50 m)</span>
+        <span>O mapa segue os filtros da tabela abaixo.</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="caixa">
     <h3><i class="fa-solid fa-list-check"></i> Veículos e máquinas <span id="contagem"></span></h3>
     <div class="ferr">
       <input type="text" id="busca" placeholder="Buscar por placa, patrimônio, modelo...">
@@ -117,7 +137,7 @@
 
 <script src="/web/comum.js"></script>
 <script>
-let cfg = null, filtro = 'todos', busca = '', fsec = '', usuario = null;
+let cfg = null, filtro = 'todos', busca = '', fsec = '', usuario = null, ultimaLista = [];
 const admin = () => usuario && usuario.perfil === 'admin';
 const CARDS = [
   ['todos', 'Total de veículos', 'fa-truck-pickup', '#0b3d6b', 'total'],
@@ -228,7 +248,7 @@ function renderResumo(r) {
   $('#pendencias').innerHTML = pend.join('') || '<span><i class="fa-solid fa-circle-check"></i> Nenhuma pendência no momento.</span>';
 }
 function renderTabela(vs) {
-
+  ultimaLista = vs; Mapa.atualizar(vs);
   $('#contagem').textContent = `(${vs.length})`;
   $('#tbody').innerHTML = vs.length ? vs.map(v => `<tr data-id="${v.id}">
     <td><b>${esc(v.chave)}</b></td><td>${esc(v.patrimonio)}</td><td>${esc(v.tipo)}</td>
@@ -241,6 +261,82 @@ function renderTabela(vs) {
 }
 let deb; $('#busca').oninput = e => { clearTimeout(deb); deb = setTimeout(() => { busca = e.target.value; carregar(); }, 250); };
 $('#fsec').onchange = e => { fsec = e.target.value; carregar(); };
+
+/* ---------- mapa (mapa-base OpenStreetMap; os pontos aparecem mesmo sem internet) ---------- */
+const Mapa = (() => {
+  const T = 256; let z = 14, c = {lat: -19.79, lon: -42.13}, pts = [], aberto = false, erros = 0, tiles = new Map(), pop = null, ajustado = false;
+  const el = $('#mapa'), tl = $('#mapaTiles'), pn = $('#mapaPinos');
+  const proj = (lat, lon, zz = z) => { const n = T * 2 ** zz, s = Math.sin(lat * Math.PI / 180); return [(lon + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n]; };
+  const unproj = (x, y, zz = z) => { const n = T * 2 ** zz; return {lon: x / n * 360 - 180, lat: Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI}; };
+  function fecharPop() { if (pop) { pop.remove(); pop = null; } }
+  function desenhar() {
+    if (!aberto) return;
+    const W = el.clientWidth, H = el.clientHeight, [cx, cy] = proj(c.lat, c.lon), ox = cx - W / 2, oy = cy - H / 2, n = 2 ** z;
+    const vis = new Set();
+    for (let x = Math.floor(ox / T); x <= Math.floor((ox + W) / T); x++)
+      for (let y = Math.max(0, Math.floor(oy / T)); y <= Math.min(n - 1, Math.floor((oy + H) / T)); y++) {
+        const xw = ((x % n) + n) % n, k = `${z}/${xw}/${y}/${x}`; vis.add(k);
+        let im = tiles.get(k);
+        if (!im) {
+          im = new Image(); im.className = 'tile'; im.draggable = false;
+          im.onerror = () => { erros++; im.style.display = 'none'; if (erros >= 2) $('#mapaAviso').style.display = 'block'; };
+          im.onload = () => { erros = 0; $('#mapaAviso').style.display = 'none'; };
+          im.src = `https://tile.openstreetmap.org/${z}/${xw}/${y}.png`; tl.appendChild(im); tiles.set(k, im);
+        }
+        im.style.left = (x * T - ox) + 'px'; im.style.top = (y * T - oy) + 'px';
+      }
+    for (const [k, im] of tiles) if (!vis.has(k)) { im.remove(); tiles.delete(k); }
+    pn.innerHTML = '';
+    pts.forEach(p => {
+      const [px, py] = proj(p.lat, p.lon), m = document.createElement('div');
+      m.className = 'pino ' + p.cls; m.style.left = (px - ox) + 'px'; m.style.top = (py - oy) + 'px'; m.title = p.chave;
+      m.onpointerdown = ev => ev.stopPropagation();
+      m.onclick = ev => { ev.stopPropagation(); popup(p, px - ox, py - oy); };
+      pn.appendChild(m);
+    });
+  }
+  function popup(p, x, y) {
+    fecharPop(); pop = document.createElement('div'); pop.className = 'mapa-pop'; pop.style.left = x + 'px'; pop.style.top = y + 'px';
+    pop.onpointerdown = ev => ev.stopPropagation();
+    pop.innerHTML = `<b>${esc(p.chave)}</b> ${badge(p.status)}<br>${esc(p.modelo)}<br><small>${esc(p.sec)}<br>${p.vist ? esc(p.vist) + ' · ' : ''}precisão ±${Math.round(p.acc || 0)} m</small>
+      <div><button class="btn peq" id="pAbrir">Abrir ficha</button> <a class="btn peq sec" target="_blank" href="${mapaLink(p.lat, p.lon)}">Google Maps</a></div>`;
+    el.appendChild(pop); $('#pAbrir').onclick = () => { fecharPop(); abrirDetalhe(p.id); };
+  }
+  function ajustar() {
+    fecharPop();
+    if (!pts.length) { z = 13; c = {lat: -19.79, lon: -42.13}; return desenhar(); }
+    const la = pts.map(p => p.lat), lo = pts.map(p => p.lon);
+    c = {lat: (Math.min(...la) + Math.max(...la)) / 2, lon: (Math.min(...lo) + Math.max(...lo)) / 2};
+    const W = el.clientWidth - 80, H = el.clientHeight - 80;
+    for (z = 18; z > 3; z--) {
+      const a = proj(Math.max(...la), Math.min(...lo)), b = proj(Math.min(...la), Math.max(...lo));
+      if (b[0] - a[0] <= W && b[1] - a[1] <= H) break;
+    }
+    desenhar();
+  }
+  let drag = null;
+  el.onpointerdown = e => { drag = {x: e.clientX, y: e.clientY, p: proj(c.lat, c.lon)}; el.setPointerCapture(e.pointerId); fecharPop(); };
+  el.onpointermove = e => { if (!drag) return; c = unproj(drag.p[0] - (e.clientX - drag.x), drag.p[1] - (e.clientY - drag.y)); desenhar(); };
+  el.onpointerup = el.onpointercancel = () => { drag = null; };
+  el.onwheel = e => { e.preventDefault(); zoom(e.deltaY < 0 ? 1 : -1); };
+  const zoom = d => { z = Math.min(19, Math.max(3, z + d)); fecharPop(); desenhar(); };
+  $('#mMais').onclick = () => zoom(1); $('#mMenos').onclick = () => zoom(-1); $('#mAjusta').onclick = ajustar;
+  $('#bMapa').onclick = () => {
+    aberto = !aberto; $('#mapaBox').style.display = aberto ? 'block' : 'none';
+    $('#bMapa').innerHTML = aberto ? '<i class="fa-solid fa-eye-slash"></i> Ocultar mapa' : '<i class="fa-solid fa-eye"></i> Mostrar mapa';
+    if (aberto) { if (!ajustado) { ajustado = true; ajustar(); } else desenhar(); }
+  };
+  window.addEventListener('resize', desenhar);
+  return {
+    atualizar(vs) {
+      pts = vs.filter(v => v.lat != null && v.lon != null).map(v => ({
+        id: v.id, chave: v.chave, lat: v.lat, lon: v.lon, acc: v.acc, status: v.status, modelo: v.marca_modelo || '', sec: v.secretaria || '',
+        vist: v.vistoriador_nome || '', cls: (v.acc != null && v.acc > 50) ? 'r' : (v.status === 'concluido' ? 'c' : 'a')}));
+      $('#mapaConta').textContent = `${pts.length} ponto(s) com GPS` + (vs.length - pts.length > 0 ? ` · ${vs.length - pts.length} sem GPS (não aparecem)` : '');
+      if (aberto && !ajustado) { ajustado = true; ajustar(); } else desenhar();
+    }
+  };
+})();
 
 /* ---------- detalhe do veículo ---------- */
 function campoHtml([k, rot, lista, larg], valor) {

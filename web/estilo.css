@@ -1,9 +1,17 @@
 /* AINDA SEM ESTILIZAÇÃO. Só o essencial para o sistema funcionar:
-   esconder/mostrar as janelas, esconder botões de administrador. */
+   esconder/mostrar as janelas, esconder botões de administrador e posicionar o mapa. */
 #login{position:fixed;inset:0;display:none;background:#fff;z-index:50;overflow:auto}
 .modal{position:fixed;inset:0;display:none;background:#fff;overflow:auto;z-index:40}
 .modal.aberto{display:block}
 .perfil-vistoriador .so-admin{display:none!important}
 img[src$="brasao.png"]{height:64px;width:auto}
 .qr img{width:200px;height:200px}
+.mapa-wrap{position:relative;height:430px;overflow:hidden;touch-action:none;user-select:none;border:1px solid}
+.mapa-wrap .tile{position:absolute;width:256px;height:256px;max-width:none;pointer-events:none}
+.mapa-wrap .pinos{position:absolute;inset:0}
+.pino{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border:2px solid;background:#fff}
+.mapa-ctl{position:absolute;top:4px;left:4px;z-index:3}
+.mapa-aviso{display:none;position:absolute;bottom:20px;left:4px;right:4px;z-index:3;background:#fff}
+.mapa-attr{position:absolute;bottom:0;right:4px;z-index:3;background:#fff}
+.mapa-pop{position:absolute;z-index:4;background:#fff;border:1px solid;padding:4px;transform:translate(-50%,-110%)}
 .rodape-fixo{background:#fff}

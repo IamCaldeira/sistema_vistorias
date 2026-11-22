@@ -81,6 +81,7 @@
         <button class="btn so-admin" id="bNovo"><i class="fa-solid fa-plus"></i> Novo veículo</button>
         <button class="btn sec so-admin" id="bImp"><i class="fa-solid fa-file-import"></i> Importar planilha</button>
         <a class="btn sec" href="/api/exportar.csv"><i class="fa-solid fa-file-export"></i> Exportar CSV</a>
+        <button class="btn verde" id="bRel"><i class="fa-solid fa-file-pdf"></i> Relatórios</button>
         <button class="btn verm so-admin" id="bZerar" title="Apaga todos os veículos e fotos do banco"><i class="fa-solid fa-database"></i> Zerar banco</button>
       </div>
     </div>
@@ -116,6 +117,27 @@
   <div class="erro" id="resImp"></div>
   <div class="acoes"><button class="btn" id="goImp"><i class="fa-solid fa-upload"></i> Importar</button></div>
 </div></div>
+<!-- relatórios -->
+<div class="modal" id="mRel"><div class="jan peq">
+  <h2><i class="fa-solid fa-file-pdf"></i> Relatórios
+    <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
+  <label>Secretaria (para os relatórios por secretaria)</label>
+  <select id="relSec"></select>
+  <div class="rel-grid">
+    <button class="btn verde" data-rel="geral"><i class="fa-solid fa-building-columns"></i> Relatório geral da frota</button>
+    <button class="btn verde" data-rel="sec"><i class="fa-solid fa-building"></i> Relatório da secretaria</button>
+    <button class="btn" data-rel="pend-todas"><i class="fa-solid fa-list-check"></i> Pendências de todas as secretarias</button>
+    <button class="btn" data-rel="pend-sec"><i class="fa-solid fa-clipboard-list"></i> Pendências da secretaria</button>
+  </div>
+  <div id="relRes"></div>
+  <hr>
+  <b><i class="fa-solid fa-shield-halved"></i> Verificar autenticidade de um relatório</b>
+  <div class="grade">
+    <div><label>Nº de controle</label><input type="text" id="vrN" placeholder="2026/00012"></div>
+    <div><label>Código</label><input type="text" id="vrC" placeholder="1A2B3-C4D5E"></div>
+  </div>
+  <div class="acoes"><button class="btn sec" id="vrGo"><i class="fa-solid fa-magnifying-glass"></i> Verificar</button></div>
+</div></div>
 <!-- usuários -->
 <div class="modal" id="mUsr"><div class="jan">
   <h2><i class="fa-solid fa-users-gear"></i> Usuários e perfis
@@ -137,7 +159,7 @@
 
 <script src="/web/comum.js"></script>
 <script>
-let cfg = null, filtro = 'todos', busca = '', fsec = '', usuario = null, ultimaLista = [];
+let cfg = null, filtro = 'todos', busca = '', fsec = '', usuario = null, ultimaLista = [], resumoAtual = null;
 const admin = () => usuario && usuario.perfil === 'admin';
 const CARDS = [
   ['todos', 'Total de veículos', 'fa-truck-pickup', '#0b3d6b', 'total'],
@@ -204,7 +226,7 @@ async function carregar() {
   const qs = new URLSearchParams({q: busca, filtro, secretaria: fsec});
   try {
     const [r, l] = await Promise.all([api('/api/resumo'), api('/api/veiculos?' + qs)]);
-    renderResumo(r); renderTabela(l.veiculos);
+    resumoAtual = r; renderResumo(r); renderTabela(l.veiculos);
   } catch (e) { if (e.sessao) location.reload(); }
 }
 function renderResumo(r) {
@@ -473,6 +495,27 @@ $('#bZerar').onclick = async () => {
     filtro = 'todos'; fsec = ''; busca = ''; $('#busca').value = ''; carregar();
   } catch (e) { tratar(e); }
 };
+
+/* ---------- relatórios ---------- */
+$('#bRel').onclick = () => {
+  const nomes = resumoAtual ? resumoAtual.por_secretaria.map(s => s.nome) : [];
+  $('#relSec').innerHTML = nomes.map(n => `<option ${n === fsec ? 'selected' : ''}>${esc(n)}</option>`).join('');
+  $('#relRes').textContent = ''; $('#mRel').classList.add('aberto');
+};
+$$('[data-rel]').forEach(b => b.onclick = async () => {
+  const k = b.dataset.rel, sec = $('#relSec').value;
+  if ((k === 'sec' || k === 'pend-sec') && !sec) { $('#relRes').textContent = 'Escolha uma secretaria.'; return; }
+  const rota = {geral: '/api/relatorio_geral', sec: '/api/relatorio_secretaria', 'pend-todas': '/api/relatorio_pendencias', 'pend-sec': '/api/relatorio_pendencias'}[k];
+  const dados = (k === 'sec' || k === 'pend-sec') ? {secretaria: sec} : {};
+  const txt0 = b.innerHTML; b.disabled = true; b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando...'; $('#relRes').textContent = '';
+  try {
+    const j = await post(rota, dados);
+    $('#relRes').innerHTML = `<i class="fa-solid fa-circle-check"></i> Gerado: <a href="${j.url}" target="_blank">abrir PDF</a> · nº <b>${esc(j.numero)}</b> · código <b>${esc(j.codigo)}</b>`;
+    window.open(j.url, '_blank');
+  } catch (e) { $('#relRes').innerHTML = `<span>${esc(e.message)}</span>`; }
+  b.disabled = false; b.innerHTML = txt0;
+});
+$('#vrGo').onclick = () => window.open(`/verificar?n=${encodeURIComponent($('#vrN').value.trim())}&c=${encodeURIComponent($('#vrC').value.trim())}`, '_blank');
 
 /* ---------- usuários (administrador) ---------- */
 async function abrirUsuarios() {

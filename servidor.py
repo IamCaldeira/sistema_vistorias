@@ -29,7 +29,8 @@ from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from html import escape as esc_html
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 try:
     import relatorio
@@ -192,6 +193,13 @@ class RotaErro(Exception):
         self.codigo = codigo
 
 
+def segredo():
+    f = DADOS / "segredo.key"
+    if not f.exists():
+        f.write_text(secrets.token_hex(32))
+    return f.read_text().strip().encode()
+
+
 def hash_senha(senha, salt=None):
     salt = salt or secrets.token_hex(16)
     h = hashlib.pbkdf2_hmac("sha256", senha.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
@@ -228,6 +236,10 @@ def iniciar_banco():
             id INTEGER PRIMARY KEY, veiculo_id INTEGER NOT NULL, etapa TEXT,
             seq INTEGER DEFAULT 1, arquivo TEXT, legenda TEXT,
             lat REAL, lon REAL, acc REAL, criado_em TEXT, usuario TEXT);
+        CREATE TABLE IF NOT EXISTS relatorios(
+            id INTEGER PRIMARY KEY, numero TEXT UNIQUE, tipo TEXT, referencia TEXT,
+            arquivo TEXT, sha256 TEXT, codigo TEXT, gerado_em TEXT,
+            usuario_nome TEXT, usuario_matricula TEXT);
         """)
         # migração: colunas acrescentadas depois da primeira versão
         def garantir(tabela, colunas):
@@ -247,6 +259,7 @@ def iniciar_banco():
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuarios_matchave ON usuarios(matricula_chave)")
         except sqlite3.IntegrityError:
             print("  [!] Há usuários com matrículas equivalentes (ex.: '12.345' e '12345'); ajuste pelo painel.")
+    segredo()
 
 
 # ---------------------------------------------------------- rede / certificado --
@@ -497,6 +510,30 @@ def gravar_cadastro(c, v, dados):
         c.execute(f"UPDATE veiculos SET {sets} WHERE id=?", [*novos.values(), v["id"]])
 
 
+def url_base():
+    ip = ips_locais()[0]
+    return f"https://{ip}:{PORTA_HTTPS}" if HTTPS_ATIVO[0] else f"http://{ip}:{PORTA_HTTP}"
+
+
+def registrar_relatorio(c, tipo, ref, usuario):
+    """Reserva o número de controle do relatório (e o código de autenticidade)."""
+    t = agora()
+    cur = c.execute("INSERT INTO relatorios(tipo, referencia, gerado_em, usuario_nome, usuario_matricula) "
+                    "VALUES(?,?,?,?,?)", (tipo, ref, t, usuario["nome"], usuario["matricula"]))
+    rid = cur.lastrowid
+    numero = f"{datetime.now().year}/{rid:05d}"
+    cod = hmac.new(segredo(), f"{numero}|{tipo}|{ref}|{t}".encode("utf-8"), hashlib.sha256).hexdigest()[:10].upper()
+    cod = f"{cod[:5]}-{cod[5:]}"
+    c.execute("UPDATE relatorios SET numero=?, codigo=? WHERE id=?", (numero, cod, rid))
+    return {"id": rid, "numero": numero, "codigo": cod,
+            "url": f"{url_base()}/verificar?n={quote(numero)}&c={cod}"}
+
+
+def finalizar_relatorio(c, ctrl, destino):
+    sha = hashlib.sha256(Path(destino).read_bytes()).hexdigest()
+    c.execute("UPDATE relatorios SET arquivo=?, sha256=? WHERE id=?", (Path(destino).name, sha, ctrl["id"]))
+
+
 def gerar_pdf_veiculo(c, vid, usuario):
     if relatorio is None:
         raise RotaErro("Gerador de PDF indisponível (instale: reportlab e pillow). " + ERRO_RELATORIO)
@@ -504,7 +541,9 @@ def gerar_pdf_veiculo(c, vid, usuario):
     d = veiculo_dict(c, v)
     fotos = fotos_do_veiculo(c, vid)
     destino = pdf_path(v["chave"])
-    relatorio.gerar_relatorio_veiculo(d, fotos, ETAPAS, pasta_fotos(v["chave"]), destino)
+    ctrl = registrar_relatorio(c, "Relatório fotográfico", v["chave"], usuario)
+    relatorio.gerar_relatorio_veiculo(d, fotos, ETAPAS, pasta_fotos(v["chave"]), destino, ctrl)
+    finalizar_relatorio(c, ctrl, destino)
     return destino
 
 
@@ -681,6 +720,48 @@ def tem_admin(c):
     return admins_ativos(c) > 0
 
 
+def codigo_relatorio(numero, tipo, ref, quando):
+    cod = hmac.new(segredo(), f"{numero}|{tipo}|{ref}|{quando}".encode("utf-8"),
+                   hashlib.sha256).hexdigest()[:10].upper()
+    return f"{cod[:5]}-{cod[5:]}"
+
+
+def pagina_verificacao(n, cod):
+    estilo = ""
+    corpo = ('<img src="/web/brasao.png" alt=""><h1>Prefeitura Municipal de Caratinga</h1>'
+             '<div>Departamento de Patrimônio · Verificação de relatório</div><hr>')
+    if n:
+        with conexao() as c:
+            r = c.execute("SELECT * FROM relatorios WHERE numero=?", (n,)).fetchone()
+        valido = bool(r and r["codigo"] and hmac.compare_digest(
+            codigo_relatorio(r["numero"], r["tipo"], r["referencia"], r["gerado_em"]), cod.upper().strip())
+            and r["codigo"] == cod.upper().strip())
+        if valido:
+            arq = ""
+            if r["arquivo"] and (REL_DIR / r["arquivo"]).exists():
+                igual = hashlib.sha256((REL_DIR / r["arquivo"]).read_bytes()).hexdigest() == r["sha256"]
+                arq = ("O arquivo PDF arquivado confere com o original." if igual else
+                       "Atenção: o arquivo PDF arquivado é diferente deste (foi substituído por uma emissão "
+                       "mais recente ou alterado).")
+            elif r["arquivo"]:
+                arq = "O arquivo PDF não está mais na pasta de relatórios."
+            corpo += ('<div class="ok">✔ Relatório autêntico</div><table>'
+                      f'<tr><td>Número de controle</td><td><b>{esc_html(r["numero"])}</b></td></tr>'
+                      f'<tr><td>Tipo</td><td>{esc_html(r["tipo"])}</td></tr>'
+                      f'<tr><td>Referência</td><td>{esc_html(r["referencia"] or "")}</td></tr>'
+                      f'<tr><td>Emitido em</td><td>{esc_html(r["gerado_em"])}</td></tr>'
+                      f'<tr><td>Emitido por</td><td>{esc_html(r["usuario_nome"])} (Mat. {esc_html(r["usuario_matricula"])})</td></tr>'
+                      f'</table><p>{esc_html(arq)}</p>')
+        else:
+            corpo += '<div class="no">✖ Relatório não encontrado ou código inválido</div>'
+        corpo += '<hr>'
+    corpo += ('<form method="get" action="/verificar"><div>Verificar outro relatório</div>'
+              f'<input name="n" placeholder="Nº (ex.: 2026/00012)" value="{esc_html(n or "")}"><br>'
+              f'<input name="c" placeholder="Código (ex.: 1A2B3-C4D5E)" value="{esc_html(cod or "")}"><br>'
+              '<button>Verificar</button></form>')
+    return f'<!doctype html><html lang="pt-br"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verificação</title><style>{estilo}</style><div class="c">{corpo}</div></html>'
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     ctx_tls = None
@@ -798,6 +879,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/ca.crt":
             return self.arquivo(CERT_DIR / "ca.pem", nome_download="Frota-Caratinga-CA.crt",
                                 tipo="application/x-x509-ca-cert")
+        if p == "/verificar":
+            return self.enviar(pagina_verificacao(self.q.get("n", ""), self.q.get("c", "")).encode("utf-8"),
+                               "text/html; charset=utf-8", 200, {"Cache-Control": "no-store"})
         if p.startswith("/web/"):
             alvo = (WEB / p[5:]).resolve()
             if WEB.resolve() not in alvo.parents:
@@ -970,6 +1054,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.corpo_json().get("confirmacao") != "ZERAR":
                 raise RotaErro("Confirmação incorreta.")
             return self.json({"ok": True, **zerar_banco()})
+        if p in ("/api/relatorio_geral", "/api/relatorio_secretaria", "/api/relatorio_pendencias"):
+            return self.relatorio_extra(p, u)
         if p == "/api/usuarios":
             self.exigir_admin()
             return self.criar_usuario()
@@ -1098,6 +1184,44 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 raise RotaErro("Ação inválida.", 404)
         self.json({"ok": True})
+
+    # ---- relatórios consolidados
+    def relatorio_extra(self, p, u):
+        if relatorio is None:
+            raise RotaErro("Gerador de PDF indisponível. " + ERRO_RELATORIO)
+        d = self.corpo_json() if self.corpo else {}
+        alvo = txt(d.get("secretaria"))
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        with conexao() as c:
+            r, vs = resumo_geral(c)
+            if p == "/api/relatorio_geral":
+                nome, tipo, ref = f"CONSOLIDADO_{ts}.pdf", "Relatório consolidado da frota", "geral"
+            elif p == "/api/relatorio_secretaria":
+                vs = [v for v in vs if nome_secretaria(v) == alvo]
+                if not vs:
+                    raise RotaErro("Escolha uma secretaria com veículos cadastrados.")
+                nome = f"SECRETARIA_{(norm(alvo) or 'sem')[:30]}_{ts}.pdf"
+                tipo, ref = "Relatório da frota por secretaria", alvo
+            else:
+                grupos = {}
+                for v in vs:
+                    if v["status"] == "concluido" or (alvo and nome_secretaria(v) != alvo):
+                        continue
+                    grupos.setdefault(nome_secretaria(v), []).append(v)
+                if not grupos:
+                    raise RotaErro("Não há veículos pendentes" + (" nessa secretaria." if alvo else "."))
+                nome = f"PENDENCIAS_{(norm(alvo) or 'todas')[:30]}_{ts}.pdf"
+                tipo, ref = "Pendências de vistoria", alvo or "todas as secretarias"
+            destino = REL_DIR / nome
+            ctrl = registrar_relatorio(c, tipo, ref, u)
+            if p == "/api/relatorio_geral":
+                relatorio.gerar_relatorio_geral(r, vs, u, destino, ctrl)
+            elif p == "/api/relatorio_secretaria":
+                relatorio.gerar_relatorio_secretaria(alvo, vs, u, destino, ctrl)
+            else:
+                relatorio.gerar_pendencias(sorted(grupos.items()), u, destino, ctrl)
+            finalizar_relatorio(c, ctrl, destino)
+        self.json({"ok": True, "url": f"/relatorios/{nome}", "numero": ctrl["numero"], "codigo": ctrl["codigo"]})
 
     # ---- veículos
     def criar_veiculo(self, u):

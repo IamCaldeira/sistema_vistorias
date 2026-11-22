@@ -23,7 +23,12 @@
 </header>
 
 <main>
-  <section class="caixa qr" id="qrbox">
+  <div class="linha1">
+    <div>
+      <section class="cards" id="cards"></section>
+      <section class="caixa" id="progresso"></section>
+    </div>
+    <section class="caixa qr" id="qrbox">
       <h3><i class="fa-solid fa-qrcode"></i> Vistoria no celular</h3>
       <div id="qrimg"></div>
       <div class="url" id="qrurl"></div>
@@ -31,24 +36,38 @@
       <div class="leg" id="qraviso"></div>
       <button class="link" id="qrCertBtn"><i class="fa-solid fa-shield-halved"></i> Celular novo? Instalar certificado</button>
       <div class="mini" id="qrCert" style="display:none"></div>
-  </section>
+    </section>
+  </div>
+
+  <div class="linha2">
+    <section class="caixa">
+      <h3><i class="fa-solid fa-building"></i> Andamento por secretaria</h3>
+      <div id="porsec"></div>
+    </section>
+    <section class="caixa">
+      <h3><i class="fa-solid fa-gauge-high"></i> Situação aparente (vistoriados)</h3>
+      <div class="sit" id="porsit"></div>
+      <h3><i class="fa-solid fa-triangle-exclamation"></i> Pendências e divergências</h3>
+      <div id="pendencias" class="leg"></div>
+    </section>
+  </div>
 
   <section class="caixa">
     <h3><i class="fa-solid fa-list-check"></i> Veículos e máquinas <span id="contagem"></span></h3>
     <div class="ferr">
       <input type="text" id="busca" placeholder="Buscar por placa, patrimônio, modelo...">
-      <select id="fstatus"><option value="todos">Todos</option><option value="pendente">Pendentes</option>
-        <option value="em_andamento">Em andamento</option><option value="concluido">Concluídos</option></select>
+      <select id="fsec"><option value="">Todas as secretarias</option></select>
       <div class="esp">
         <button class="btn so-admin" id="bNovo"><i class="fa-solid fa-plus"></i> Novo veículo</button>
         <button class="btn sec so-admin" id="bImp"><i class="fa-solid fa-file-import"></i> Importar planilha</button>
         <a class="btn sec" href="/api/exportar.csv"><i class="fa-solid fa-file-export"></i> Exportar CSV</a>
+        <button class="btn verm so-admin" id="bZerar" title="Apaga todos os veículos e fotos do banco"><i class="fa-solid fa-database"></i> Zerar banco</button>
       </div>
     </div>
     <div class="tab-wrap">
       <table>
         <thead><tr><th>Identificação</th><th>Patrimônio</th><th>Tipo</th><th>Marca / Modelo</th><th>Chassi</th><th>Renavam</th><th>Secretaria</th>
-          <th>Status</th><th>Situação</th><th>Etapas</th><th>Vistoriador</th><th>PDF</th></tr></thead>
+          <th>Status</th><th>Situação</th><th>Plotado</th><th>Etapas</th><th>Alertas</th><th>Vistoriador</th><th>PDF</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
@@ -92,14 +111,26 @@
     <button class="btn verde" id="nuCriar"><i class="fa-solid fa-plus"></i> Criar</button>
   </div>
   <div class="erro" id="usrErro"></div>
-  <div class="leg"><span><b>Administrador:</b> tudo (importar, editar, excluir, usuários).</span>
+  <div class="leg"><span><b>Administrador:</b> tudo (importar, editar, excluir, zerar banco, usuários).</span>
     <span><b>Vistoriador:</b> vistoria no celular, consulta no painel e geração de relatórios.</span></div>
 </div></div>
 
 <script src="/web/comum.js"></script>
 <script>
-let cfg = null, filtro = 'todos', busca = '', usuario = null;
+let cfg = null, filtro = 'todos', busca = '', fsec = '', usuario = null;
 const admin = () => usuario && usuario.perfil === 'admin';
+const CARDS = [
+  ['todos', 'Total de veículos', 'fa-truck-pickup', '#0b3d6b', 'total'],
+  ['concluido', 'Concluídos', 'fa-clipboard-check', '#2e7d32', 'concluido'],
+  ['em_andamento', 'Em andamento', 'fa-spinner', '#1e88e5', 'em_andamento'],
+  ['pendente', 'Pendentes', 'fa-hourglass-half', '#f9a825', 'pendente'],
+  ['nao_localizado', 'Não localizados', 'fa-circle-question', '#c62828', 'nao_localizado'],
+  ['campo', 'Cadastrados em campo', 'fa-circle-plus', '#6a1b9a', 'campo'],
+  ['avarias', 'Com avarias', 'fa-car-burst', '#8d6e63', 'avarias'],
+  ['itens', 'Itens de segurança ausentes', 'fa-screwdriver-wrench', '#00838f', 'itens'],
+  ['puladas', 'Fotos puladas', 'fa-forward', '#e65100', 'puladas'],
+  ['gps', 'Sem GPS / impreciso', 'fa-location-crosshairs', '#455a64', 'gps'],
+];
 const CAMPOS = [
   ['patrimonio', 'Nº de patrimônio'], ['placa', 'Placa'], ['tipo', 'Tipo', 'tipos'],
   ['ano', 'Ano'], ['marca_modelo', 'Marca / Modelo', null, true], ['chassi', 'Chassi / Nº de série'],
@@ -148,24 +179,68 @@ async function montarQR() {
 }
 $('#qrCertBtn').onclick = () => { const b = $('#qrCert'); b.style.display = b.style.display === 'none' ? 'block' : 'none'; };
 
-/* ---------- lista de veículos ---------- */
+/* ---------- dashboard ---------- */
 async function carregar() {
-  try { renderTabela((await api('/api/veiculos?' + new URLSearchParams({q: busca, filtro}))).veiculos); }
-  catch (e) { if (e.sessao) location.reload(); }
+  const qs = new URLSearchParams({q: busca, filtro, secretaria: fsec});
+  try {
+    const [r, l] = await Promise.all([api('/api/resumo'), api('/api/veiculos?' + qs)]);
+    renderResumo(r); renderTabela(l.veiculos);
+  } catch (e) { if (e.sessao) location.reload(); }
+}
+function renderResumo(r) {
+  $('#cards').innerHTML = CARDS.map(([f, t, ic, cor, k]) => `
+    <div class="card ${filtro === f ? 'ativo' : ''}" data-f="${f}">
+      <div class="ic"><i class="fa-solid ${ic}"></i></div>
+      <div><div class="n">${r[k]}</div><div class="t">${t}</div></div></div>`).join('');
+  $$('#cards .card').forEach(c => c.onclick = () => { filtro = c.dataset.f; carregar(); });
+  const pc = r.total ? r.concluido / r.total * 100 : 0, pa = r.total ? r.em_andamento / r.total * 100 : 0;
+  $('#progresso').innerHTML = `<h3><i class="fa-solid fa-chart-simple"></i> Progresso geral: ${pc.toFixed(0)}% concluído</h3>
+    <div class="prog"><div class="p-c"></div><div class="p-a"></div></div>
+    <div class="leg"><span><i class="fa-solid fa-square"></i> Concluídos ${r.concluido}</span>
+      <span><i class="fa-solid fa-square"></i> Em andamento ${r.em_andamento}</span>
+      <span><i class="fa-solid fa-square"></i> Pendentes ${r.pendente}</span>
+      <span><i class="fa-solid fa-camera"></i> ${r.total_fotos} fotos registradas</span></div>`;
+  $('#porsec').innerHTML = r.por_secretaria.length ? r.por_secretaria.map(s => {
+    const c = s.concluido / s.total * 100, a = s.em_andamento / s.total * 100;
+    return `<div class="barra-sec" data-s="${esc(s.nome)}" title="${esc(s.nome)}">
+      <div class="nome">${esc(s.nome)}</div>
+      <div class="prog"><div class="p-c"></div><div class="p-a"></div></div>
+      <div>${s.concluido}/${s.total}</div></div>`;
+  }).join('') : '<div class="vazio">Importe a planilha da frota para começar.</div>';
+  $$('#porsec .barra-sec').forEach(b => b.onclick = () => { fsec = b.dataset.s; $('#fsec').value = fsec; carregar(); });
+  const sel = $('#fsec'), nomes = r.por_secretaria.map(s => s.nome);
+  if (sel.dataset.n !== nomes.join('|')) {
+    sel.innerHTML = '<option value="">Todas as secretarias</option>' + nomes.map(n => `<option>${esc(n)}</option>`).join('');
+    sel.dataset.n = nomes.join('|'); sel.value = fsec;
+  }
+  const ic = {'Em uso': 'fa-road', 'Parado': 'fa-circle-pause', 'Em oficina': 'fa-wrench',
+              'Inservível / sucata': 'fa-ban', 'Não localizado': 'fa-circle-question'};
+  $('#porsit').innerHTML = r.por_situacao.map(s => `<span><i class="fa-solid ${ic[s.nome] || 'fa-circle'}"></i> ${esc(s.nome)}: <b>${s.n}</b></span>`).join('')
+    + `<span><i class="fa-solid fa-palette"></i> Plotados: <b>${r.plotado_sim}</b> · Não plotados: <b>${r.plotado_nao}</b></span>`;
+  const pend = [];
+  if (r.pendente) pend.push(`<span><i class="fa-solid fa-hourglass-half a-puladas"></i> ${r.pendente} veículo(s) ainda sem vistoria</span>`);
+  if (r.nao_localizado) pend.push(`<span><i class="fa-solid fa-circle-question a-nao_localizado"></i> ${r.nao_localizado} não localizado(s)</span>`);
+  if (r.campo) pend.push(`<span><i class="fa-solid fa-circle-plus a-campo"></i> ${r.campo} veículo(s) fora da lista do patrimônio</span>`);
+  if (r.itens) pend.push(`<span><i class="fa-solid fa-screwdriver-wrench"></i> ${r.itens} sem algum item de segurança</span>`);
+  if (r.placa_ilegivel) pend.push(`<span><i class="fa-solid fa-eye-slash a-sem_gps"></i> ${r.placa_ilegivel} com placa ilegível</span>`);
+  if (r.puladas) pend.push(`<span><i class="fa-solid fa-forward a-puladas"></i> ${r.puladas} com fotos puladas</span>`);
+  if (r.gps) pend.push(`<span><i class="fa-solid fa-location-crosshairs a-sem_gps"></i> ${r.gps} sem GPS ou com GPS impreciso</span>`);
+  $('#pendencias').innerHTML = pend.join('') || '<span><i class="fa-solid fa-circle-check"></i> Nenhuma pendência no momento.</span>';
 }
 function renderTabela(vs) {
+
   $('#contagem').textContent = `(${vs.length})`;
   $('#tbody').innerHTML = vs.length ? vs.map(v => `<tr data-id="${v.id}">
     <td><b>${esc(v.chave)}</b></td><td>${esc(v.patrimonio)}</td><td>${esc(v.tipo)}</td>
     <td>${esc(v.marca_modelo)}</td><td>${esc(v.chassi)}</td><td>${esc(v.renavam)}</td><td>${esc(v.secretaria)}</td><td>${badge(v.status)}</td>
-    <td>${esc(v.situacao)}</td><td>${v.status === 'pendente' ? '' : v.etapas_feitas + '/' + v.etapas_total + ' · ' + v.n_fotos + ' fotos'}</td>
-    <td>${esc(v.vistoriador_nome)}</td>
+    <td>${esc(v.situacao)}</td><td>${esc(v.plotado)}</td><td>${v.status === 'pendente' ? '' : v.etapas_feitas + '/' + v.etapas_total + ' · ' + v.n_fotos + ' fotos'}</td>
+    <td>${icones(v.alertas)}</td><td>${esc(v.vistoriador_nome)}</td>
     <td>${v.pdf ? `<a href="/relatorios/${v.chave}_relatorio.pdf" target="_blank" onclick="event.stopPropagation()"><i class="fa-solid fa-file-pdf"></i></a>` : ''}</td></tr>`).join('')
-    : '<tr><td colspan="12" class="vazio">Nenhum veículo encontrado.</td></tr>';
+    : '<tr><td colspan="14" class="vazio">Nenhum veículo encontrado.</td></tr>';
   $$('#tbody tr[data-id]').forEach(tr => tr.onclick = () => abrirDetalhe(+tr.dataset.id));
 }
 let deb; $('#busca').oninput = e => { clearTimeout(deb); deb = setTimeout(() => { busca = e.target.value; carregar(); }, 250); };
-$('#fstatus').onchange = e => { filtro = e.target.value; carregar(); };
+$('#fsec').onchange = e => { fsec = e.target.value; carregar(); };
 
 /* ---------- detalhe do veículo ---------- */
 function campoHtml([k, rot, lista, larg], valor) {
@@ -181,6 +256,10 @@ function renderDetalhe(v) {
   const gps = v.lat != null ? `${v.lat.toFixed(6)}, ${v.lon.toFixed(6)} ${v.acc != null ? '(±' + Math.round(v.acc) + ' m)' : ''}
       <a href="${mapaLink(v.lat, v.lon)}" target="_blank"><i class="fa-solid fa-map-location-dot"></i> mapa</a>` : '<i>sem registro</i>';
   const etapas = v.etapas.map(e => `<span class="${e.status}">${esc(e.titulo)}${e.n ? ' (' + e.n + ')' : ''}${e.status === 'pulada' ? ' · pulada' : ''}${e.status === 'sem_avarias' ? ' · sem avarias' : ''}</span>`).join('');
+  const io = v.itens_obj || {};
+  const itens = `<div class="itens painel">${cfg.itens.map(i => `<label><input type="checkbox" data-item="${i.id}" ${io[i.id] ? 'checked' : ''}> ${esc(i.titulo)}</label>`).join('')}
+    <label class="na"><input type="checkbox" data-item="na" ${io.na ? 'checked' : ''}> Não se aplica</label></div>
+    ${v.itens_obj ? '' : '<div class="leg">Itens ainda não verificados.</div>'}`;
   const fotos = v.fotos.map(f => {
     const e = v.etapas.find(x => x.id === f.etapa);
     return `<figure><a href="${f.url}" target="_blank"><img loading="lazy" src="${f.url}?w=420" alt=""></a>
@@ -192,7 +271,7 @@ function renderDetalhe(v) {
       </figcaption></figure>`;
   }).join('');
   $('#det').innerHTML = `
-    <h2><i class="fa-solid fa-truck-pickup"></i> ${esc(v.chave)} ${badge(v.status)}
+    <h2><i class="fa-solid fa-truck-pickup"></i> ${esc(v.chave)} ${badge(v.status)} ${icones(v.alertas)}
       <button class="btn sec peq fechar" data-fechar><i class="fa-solid fa-xmark"></i> Fechar</button></h2>
     <datalist id="dl-tipos">${cfg.tipos.map(t => `<option value="${esc(t)}">`).join('')}</datalist>
     <h3><i class="fa-solid fa-id-card"></i> Cadastro patrimonial</h3>
@@ -200,8 +279,13 @@ function renderDetalhe(v) {
     <h3><i class="fa-solid fa-clipboard-check"></i> Vistoria</h3>
     <div class="grade">
       <div><label>Situação aparente</label><select data-k="situacao">${sit}</select></div>
+      <div><label>Plotado</label><select data-k="plotado">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.plotado || '') ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+      <div><label>Placa legível</label><select data-k="placa_legivel">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.placa_legivel || '') ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
       <div><label>Odômetro / Horímetro</label><input type="text" data-k="odometro" value="${esc(v.odometro)}"></div>
       <div class="larg"><label>Local verificado</label><input type="text" data-k="local_visto" value="${esc(v.local_visto)}"></div>
+      <div class="larg"><label>Onde o veículo é utilizado</label><input type="text" data-k="uso_local" value="${esc(v.uso_local)}"></div>
+      <div class="larg"><label>Nome do motorista / operador</label><input type="text" data-k="motorista" value="${esc(v.motorista)}"></div>
+      <div class="larg"><label>Itens de segurança</label>${itens}</div>
       <div class="larg"><label>Observações</label><textarea data-k="obs" rows="2">${esc(v.obs)}</textarea></div>
     </div>
     <div>
@@ -222,11 +306,14 @@ function renderDetalhe(v) {
       <button class="btn sec so-admin" id="dReiniciar"><i class="fa-solid fa-rotate-left"></i> Reiniciar vistoria</button>
       <button class="btn verm so-admin" id="dExcluir"><i class="fa-solid fa-trash"></i> Excluir veículo</button>
     </div>`;
-  if (!admin()) $$('#det [data-k]').forEach(el => el.disabled = true);
+  if (!admin()) $$('#det [data-k], #det [data-item]').forEach(el => el.disabled = true);
+  let itensTocados = false;
+  $$('#det [data-item]').forEach(cb => cb.onchange = () => { itensTocados = true; });
   $$('#det [data-fechar]').forEach(b => b.onclick = fechar);
   const id = v.id, erro = t => $('#erroDet').textContent = t || '';
   $('#dSalvar').onclick = async () => {
     const d = {}; $$('#det [data-k]').forEach(el => d[el.dataset.k] = el.value);
+    if (itensTocados) { d.itens = {}; $$('#det [data-item]').forEach(cb => d.itens[cb.dataset.item] = cb.checked); }
     try { const j = await post(`/api/veiculos/${id}/salvar`, d); renderDetalhe(j.veiculo); } catch (e) { e.sessao ? tratar(e) : erro(e.message); }
   };
   $('#dPdf').onclick = async ev => {
@@ -277,6 +364,18 @@ $('#goImp').onclick = async () => {
       (j.n_erros ? `<br><span>${j.n_erros} linha(s) ignorada(s):<br>${j.erros.map(esc).join('<br>')}</span>` : '');
     carregar();
   } catch (e) { $('#resImp').innerHTML = `<span>${esc(e.message)}</span>`; }
+};
+
+/* ---------- zerar banco ---------- */
+$('#bZerar').onclick = async () => {
+  if (!confirm('ATENÇÃO: isto apaga TODOS os veículos, vistorias e fotos do sistema.\n\nUma cópia do banco e das fotos fica guardada na pasta "dados". Continuar?')) return;
+  const t = prompt('Para confirmar, digite ZERAR (em maiúsculas):');
+  if (t !== 'ZERAR') { if (t !== null) alert('Confirmação incorreta. Nada foi apagado.'); return; }
+  try {
+    const j = await post('/api/zerar_banco', {confirmacao: t});
+    alert(`Banco zerado (${j.apagados} veículo(s) removido(s)).\nCópia de segurança: ${j.copia}`);
+    filtro = 'todos'; fsec = ''; busca = ''; $('#busca').value = ''; carregar();
+  } catch (e) { tratar(e); }
 };
 
 /* ---------- usuários (administrador) ---------- */

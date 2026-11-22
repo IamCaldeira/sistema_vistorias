@@ -176,6 +176,20 @@ def _imagem(caminho, larg_max, alt_max):
     return Image(buf, width=w * esc, height=h * esc)
 
 
+def _linhas_itens(v):
+    """Linhas do quadro 'Dados da vistoria' para estepe/triângulo/macaco/chave de roda."""
+    if v.get("situacao") == "Não localizado":
+        return []
+    o = v.get("itens_obj")
+    if not o:
+        return [("Itens de segurança", "Não verificado", True)]
+    if o.get("na"):
+        return [("Itens de segurança", "Não se aplica a este veículo/máquina", True)]
+    f = lambda k: "Sim" if o.get(k) else "NÃO POSSUI"
+    return [("Estepe", f("estepe"), False), ("Triângulo", f("triangulo"), False),
+            ("Macaco", f("macaco"), False), ("Chave de roda", f("chave_roda"), False)]
+
+
 def _fmt_gps(lat, lon, acc):
     if lat is None or lon is None:
         return ""
@@ -209,8 +223,13 @@ def gerar_relatorio_veiculo(v, fotos, etapas, pasta_fotos, destino):
     ]
     itens = [
         ("Situação aparente", v.get("situacao"), False),
+        ("Plotado", v.get("plotado"), False),
+        ("Placa legível", v.get("placa_legivel"), False),
         ("Odômetro / Horímetro", v.get("odometro"), False),
         ("Local verificado", v.get("local_visto"), True),
+        ("Onde o veículo é utilizado", v.get("uso_local"), True),
+        ("Nome do motorista", v.get("motorista"), True),
+        *_linhas_itens(v),
         ("Início", fmt_data(v.get("inicio")), False),
         ("Término", fmt_data(v.get("fim")), False),
         ("Localização (GPS)", _fmt_gps(v.get("lat"), v.get("lon"), v.get("acc")), True),

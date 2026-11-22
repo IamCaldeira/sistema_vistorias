@@ -90,7 +90,7 @@ async function carregarLista() {
   el.innerHTML = ok.length ? ok.slice(0, 60).map(x => `
       <a class="item" data-id="${x.id}"><div class="l1"><b>${esc(x.chave)}</b>${badge(x.status)}</div>
       <div>${esc(x.marca_modelo) || '<i>sem descrição</i>'}</div>
-      <small>${esc(x.secretaria)}${x.local_cadastro ? ' · ' + esc(x.local_cadastro) : ''}</small></a>`).join('')
+      <small>${esc(x.secretaria)}${x.local_cadastro ? ' · ' + esc(x.local_cadastro) : ''}</small> ${icones(x.alertas)}</a>`).join('')
     + (ok.length > 60 ? `<div class="dica">Mostrando 60 de ${ok.length}. Use a busca.</div>` : '')
     : '<div class="dica">Nenhum veículo encontrado.</div>';
   $$('#lista .item').forEach(a => a.onclick = () => telaVeiculo(+a.dataset.id));
@@ -111,6 +111,7 @@ async function telaVeiculo(id) {
   try { v = (await api('/api/veiculos/' + id)).veiculo; } catch (e) { tratar(e); return telaLista(); }
   const linha = (r, x) => x ? `<div><span>${r}</span><b>${esc(x)}</b></div>` : '';
   const sit = ['', ...cfg.situacoes].map(s => `<option ${s === (v.situacao || '') ? 'selected' : ''}>${esc(s)}</option>`).join('');
+  const io = v.itens_obj || {};
   let topo = '';
   if (v.status === 'concluido')
     topo = `<div class="aviso"><i class="fa-solid fa-circle-check"></i>
@@ -129,8 +130,17 @@ async function telaVeiculo(id) {
       ${linha('Secretaria', v.secretaria)}${linha('Local cadastrado', v.local_cadastro)}${linha('Responsável', v.responsavel)}</div>
     ${v.status !== 'concluido' ? `
     <label>Situação aparente *</label><select id="f-situacao">${sit}</select>
+    <label>Veículo plotado (adesivado com identificação da Prefeitura)?</label>
+    <select id="f-plotado">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.plotado || '') ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <label>Placa legível?</label>
+    <select id="f-placaleg">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.placa_legivel || '') ? 'selected' : ''}>${s}</option>`).join('')}</select>
     <label>Odômetro / Horímetro</label><input type="text" id="f-odometro" inputmode="numeric" value="${esc(v.odometro)}">
     <label>Local onde está agora</label><input type="text" id="f-local" value="${esc(v.local_visto || v.local_cadastro)}">
+    <label>Onde o veículo é utilizado</label><input type="text" id="f-uso" placeholder="ex.: transporte de pacientes, Secretaria de Saúde" value="${esc(v.uso_local)}">
+    <label>Nome do motorista / operador</label><input type="text" id="f-motorista" autocomplete="off" placeholder="${v.responsavel ? 'Cadastro: ' + esc(v.responsavel) : ''}" value="${esc(v.motorista)}">
+    <label>Itens de segurança presentes (marque os que o veículo possui)</label>
+    <div class="itens">${cfg.itens.map(i => `<label><input type="checkbox" data-item="${i.id}" ${io[i.id] ? 'checked' : ''}> ${esc(i.titulo)}</label>`).join('')}
+      <label class="na"><input type="checkbox" id="item-na" ${io.na ? 'checked' : ''}> Não se aplica (moto, máquina, implemento...)</label></div>
     <label>Observações</label><textarea id="f-obs" rows="2">${esc(v.obs)}</textarea>
     <details><summary>Corrigir dados do cadastro</summary>
       ${CAMPOS_CAD.map(([k, r]) => `<label>${r}</label><input type="text" data-cad="${k}" value="${esc(v[k])}">`).join('')}</details>
@@ -143,10 +153,16 @@ async function telaVeiculo(id) {
     if (!confirm('Apagar todas as fotos e refazer a vistoria deste veículo?')) return;
     try { await acao('reiniciar'); telaVeiculo(v.id); } catch (e) { tratar(e); }
   };
+  if ($('#item-na')) {
+    const sync = () => $$('[data-item]').forEach(cb => { cb.disabled = $('#item-na').checked; if ($('#item-na').checked) cb.checked = false; });
+    $('#item-na').onchange = sync; sync();
+  }
   if ($('#iniciar')) $('#iniciar').onclick = async () => {
     const cadastro = {}; $$('[data-cad]').forEach(el => cadastro[el.dataset.cad] = el.value.trim());
+    const itens = {na: $('#item-na').checked}; $$('[data-item]').forEach(cb => itens[cb.dataset.item] = cb.checked);
     const dados = {situacao: $('#f-situacao').value, odometro: $('#f-odometro').value, local_visto: $('#f-local').value,
-                   obs: $('#f-obs').value, cadastro};
+                   uso_local: $('#f-uso').value, motorista: $('#f-motorista').value, plotado: $('#f-plotado').value, placa_legivel: $('#f-placaleg').value,
+                   obs: $('#f-obs').value, itens, cadastro};
     if (!dados.situacao) { $('#msg').textContent = 'Escolha a situação aparente.'; return; }
     try { await acao('iniciar', dados); if (v.situacao === 'Não localizado') telaRevisao(); else proxima(); }
     catch (e) { $('#msg').textContent = e.message; }
@@ -234,10 +250,17 @@ async function telaRevisao() {
     return `<div class="rev"><div class="l1">${ic}<b>${esc(e.titulo)}</b><small>${tx}</small>
       <button class="btn sec peq" data-ir="${i}">${e.status === 'pendente' ? 'Fazer' : 'Refazer'}</button></div>${miniaturas(fotos, false)}</div>`;
   }).join('');
+  const o = v.itens_obj;
+  const itensTxt = !o ? '—' : o.na ? 'Não se aplica' : cfg.itens.map(i => `${i.titulo}: ${o[i.id] ? 'sim' : '<b>não</b>'}`).join(' · ');
   app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
     <div class="etapa-titulo">Revisão · ${esc(v.chave)}</div>
     <div class="dados"><div><span>Situação</span><b>${esc(v.situacao)}</b></div>
+      <div><span>Plotado</span><b>${esc(v.plotado) || '—'}</b></div>
+      <div><span>Placa legível</span><b>${esc(v.placa_legivel) || '—'}</b></div>
       <div><span>Odômetro/Horímetro</span><b>${esc(v.odometro) || '—'}</b></div>
+      ${v.uso_local ? `<div><span>Utilizado em</span><b>${esc(v.uso_local)}</b></div>` : ''}
+      ${v.motorista ? `<div><span>Motorista</span><b>${esc(v.motorista)}</b></div>` : ''}
+      <div><span>Itens</span><b>${itensTxt}</b></div>
       <div><span>GPS</span><b>${v.lat != null ? '±' + Math.round(v.acc ?? 0) + ' m' : 'não registrado'}</b></div></div>
     ${naoLoc ? '<div class="aviso">Veículo marcado como <b>não localizado</b>. Não é necessário tirar fotos.</div>' : linhas}
     <div id="msg" class="erro"></div>

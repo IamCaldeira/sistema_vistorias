@@ -92,8 +92,11 @@ TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ôni
          "Implemento / Reboque", "Outro"]
 CAD = ["patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi", "renavam",
        "secretaria", "local_cadastro", "responsavel", "situacao_cadastro"]
-VIST = ["situacao", "odometro", "local_visto", "obs"]
+VIST = ["situacao", "odometro", "local_visto", "uso_local", "motorista", "plotado", "placa_legivel", "obs"]
+ITENS = [("estepe", "Estepe"), ("triangulo", "Triângulo"), ("macaco", "Macaco"),
+         ("chave_roda", "Chave de roda")]
 PERFIS = ("admin", "vistoriador")
+GPS_RUIM = 50  # metros
 # O certificado local só vale para estas redes (segurança: não serve para outros sites)
 REDES_PERMITIDAS = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 TENTATIVAS = {}  # matrícula -> (erros, bloqueado_até)
@@ -124,6 +127,13 @@ ALIASES = {
 CONTEM = [("chassi", "chassi"), ("serie", "chassi"), ("renavam", "renavam"),
           ("patrimonio", "patrimonio"), ("placa", "placa"), ("secretaria", "secretaria"),
           ("responsavel", "responsavel"), ("motorista", "responsavel")]
+ROTULO_FLAGS = {
+    "nao_localizado": "Não localizado", "campo": "Cadastrado em campo",
+    "sem_gps": "Sem GPS", "gps_impreciso": "GPS impreciso",
+    "puladas": "Fotos puladas", "avarias": "Com avarias",
+    "itens_faltando": "Itens de segurança ausentes", "placa_ilegivel": "Placa ilegível",
+}
+
 # ---------------------------------------------------------------- utilidades --
 def agora():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -225,6 +235,9 @@ def iniciar_banco():
             for nome, tipo in colunas:
                 if nome not in existentes:
                     c.execute(f"ALTER TABLE {tabela} ADD COLUMN {nome} {tipo}")
+        garantir("veiculos", [("uso_local", "TEXT"), ("motorista", "TEXT"),
+                              ("plotado", "TEXT"), ("itens", "TEXT"),
+                              ("placa_legivel", "TEXT")])
         garantir("usuarios", [("senha_hash", "TEXT"), ("salt", "TEXT"),
                               ("perfil", "TEXT DEFAULT 'vistoriador'"), ("ativo", "INTEGER DEFAULT 1"),
                               ("matricula_chave", "TEXT")])
@@ -380,14 +393,51 @@ def status_etapas(v, fotos):
     return res
 
 
+def limpar_itens(d):
+    """Valida o dicionário de itens de segurança e devolve JSON (ou None)."""
+    if not isinstance(d, dict):
+        return None
+    r = {k: bool(d.get(k)) for k, _ in ITENS}
+    r["na"] = bool(d.get("na"))
+    return json.dumps(r)
+
+
+def calcular_flags(v, n_avarias):
+    f = []
+    if v["situacao"] == "Não localizado":
+        f.append("nao_localizado")
+    if v["origem"] == "campo":
+        f.append("campo")
+    if v["status"] != "pendente" and v["situacao"] != "Não localizado" and v["lat"] is None:
+        f.append("sem_gps")
+    if v["acc"] is not None and v["acc"] > GPS_RUIM:
+        f.append("gps_impreciso")
+    if json.loads(v["puladas"] or "[]"):
+        f.append("puladas")
+    if n_avarias:
+        f.append("avarias")
+    if v["placa_legivel"] == "Não":
+        f.append("placa_ilegivel")
+    if v["itens"] and v["situacao"] != "Não localizado":
+        o = json.loads(v["itens"])
+        if not o.get("na") and not all(o.get(k) for k, _ in ITENS):
+            f.append("itens_faltando")
+    return f
+
+
 def veiculo_dict(c, v, completo=False):
     fotos = fotos_do_veiculo(c, v["id"])
     d = dict(v)
     d["puladas_lista"] = json.loads(d.get("puladas") or "[]")
+    d["itens_obj"] = json.loads(d["itens"]) if d.get("itens") else None
+    n_av = sum(1 for f in fotos if f["etapa"] == "avarias")
     d["n_fotos"] = len(fotos)
+    d["n_avarias"] = n_av
     etapas = status_etapas(v, fotos)
     d["etapas_feitas"] = sum(1 for e in etapas if e["status"] != "pendente")
     d["etapas_total"] = len(etapas)
+    d["alertas"] = calcular_flags(v, n_av)
+    d["alertas_texto"] = [ROTULO_FLAGS[a] for a in d["alertas"]]
     d["pdf"] = pdf_path(v["chave"]).exists()
     if completo:
         d["etapas"] = etapas
@@ -456,6 +506,64 @@ def gerar_pdf_veiculo(c, vid, usuario):
     destino = pdf_path(v["chave"])
     relatorio.gerar_relatorio_veiculo(d, fotos, ETAPAS, pasta_fotos(v["chave"]), destino)
     return destino
+
+
+def nome_secretaria(v):
+    return txt(v["secretaria"]) or "(sem secretaria)"
+
+
+def resumo_geral(c):
+    vs = [veiculo_dict(c, v) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
+    r = {"total": len(vs), "total_fotos": sum(v["n_fotos"] for v in vs)}
+    for s in ("pendente", "em_andamento", "concluido"):
+        r[s] = sum(1 for v in vs if v["status"] == s)
+    r["nao_localizado"] = sum(1 for v in vs if "nao_localizado" in v["alertas"])
+    r["campo"] = sum(1 for v in vs if "campo" in v["alertas"])
+    r["avarias"] = sum(1 for v in vs if "avarias" in v["alertas"])
+    r["puladas"] = sum(1 for v in vs if "puladas" in v["alertas"])
+    r["itens"] = sum(1 for v in vs if "itens_faltando" in v["alertas"])
+    r["placa_ilegivel"] = sum(1 for v in vs if "placa_ilegivel" in v["alertas"])
+    r["gps"] = sum(1 for v in vs if "sem_gps" in v["alertas"] or "gps_impreciso" in v["alertas"])
+    sec = {}
+    for v in vs:
+        nome = nome_secretaria(v)
+        s = sec.setdefault(nome, {"nome": nome, "total": 0, "pendente": 0,
+                                  "em_andamento": 0, "concluido": 0, "nao_localizado": 0})
+        s["total"] += 1
+        s[v["status"]] += 1
+        if "nao_localizado" in v["alertas"]:
+            s["nao_localizado"] += 1
+    r["por_secretaria"] = sorted(sec.values(), key=lambda s: -s["total"])
+    sit = Counter(v["situacao"] for v in vs if v["situacao"])
+    r["por_situacao"] = [{"nome": s, "n": sit.get(s, 0)} for s in SITUACOES]
+    r["plotado_sim"] = sum(1 for v in vs if v["plotado"] == "Sim")
+    r["plotado_nao"] = sum(1 for v in vs if v["plotado"] == "Não")
+    return r, vs
+
+
+def zerar_banco():
+    """Apaga veículos e fotos do banco. Antes, guarda cópia do .db e move fotos/PDFs."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bkp = DADOS / "backups"
+    bkp.mkdir(exist_ok=True)
+    copia = bkp / f"frota_{ts}.db"
+    with conexao() as c:
+        qtd = c.execute("SELECT COUNT(*) FROM veiculos").fetchone()[0]
+        dest = sqlite3.connect(copia)
+        c.backup(dest)
+        dest.close()
+        c.execute("DELETE FROM fotos")
+        c.execute("DELETE FROM veiculos")
+    pasta = EXCL_DIR / f"zerado_{ts}"
+    for origem in (FOTOS_DIR, REL_DIR):
+        if origem.exists() and any(origem.iterdir()):
+            pasta.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(origem), str(pasta / origem.name))
+        origem.mkdir(exist_ok=True)
+    for m in MINI_DIR.glob("*"):
+        m.unlink(missing_ok=True)
+    print(f"[!] Banco zerado ({qtd} veículos). Cópia em {copia}")
+    return {"apagados": qtd, "copia": str(copia)}
 
 
 # --------------------------------------------------------------- importação ----
@@ -719,6 +827,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/config":
             return self.json(self.config())
         self.exigir()
+        if p == "/api/resumo":
+            with conexao() as c:
+                r, _ = resumo_geral(c)
+            return self.json({"ok": True, **r})
         if p == "/api/veiculos":
             return self.json({"ok": True, "veiculos": self.listar()})
         m = re.fullmatch(r"/api/veiculos/(\d+)", p)
@@ -750,23 +862,34 @@ class Handler(BaseHTTPRequestHandler):
                          "http": f"http://{ip}:{PORTA_HTTP}/m",
                          "https": f"https://{ip}:{PORTA_HTTPS}/m" if HTTPS_ATIVO[0] else ""})
         return {"ok": True, "etapas": ETAPAS, "situacoes": SITUACOES, "tipos": TIPOS,
+                "itens": [{"id": k, "titulo": t} for k, t in ITENS],
                 "https_ativo": HTTPS_ATIVO[0], "urls": urls, "pdf_ok": relatorio is not None,
-                "qr_ok": segno is not None,
+                "qr_ok": segno is not None, "gps_ruim": GPS_RUIM,
                 "ca_ok": (CERT_DIR / "ca.pem").exists()}
 
     def listar(self):
-        q, filtro = norm(self.q.get("q", "")), self.q.get("filtro", "todos")
+        q, filtro, sec = norm(self.q.get("q", "")), self.q.get("filtro", "todos"), self.q.get("secretaria", "")
+        limite = int(self.q.get("limite") or 0)
+        completo = self.q.get("completo") == "1"
         with conexao() as c:
-            vs = [veiculo_dict(c, v) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
+            vs = [veiculo_dict(c, v, completo) for v in c.execute("SELECT * FROM veiculos ORDER BY chave")]
         out = []
         for v in vs:
+            if sec and nome_secretaria(v) != sec:
+                continue
             if q and q not in norm(" ".join(txt(v[k]) for k in
                                             ("chave", "patrimonio", "placa", "marca_modelo", "secretaria", "tipo"))):
                 continue
             if filtro in ("pendente", "em_andamento", "concluido") and v["status"] != filtro:
                 continue
+            if filtro in ("nao_localizado", "campo", "avarias", "puladas") and filtro not in v["alertas"]:
+                continue
+            if filtro == "itens" and "itens_faltando" not in v["alertas"]:
+                continue
+            if filtro == "gps" and not ({"sem_gps", "gps_impreciso"} & set(v["alertas"])):
+                continue
             out.append(v)
-        return out
+        return out[:limite] if limite else out
 
     def servir_foto(self, p):
         partes = p.split("/")
@@ -794,19 +917,27 @@ class Handler(BaseHTTPRequestHandler):
         cab = ["identificacao", "patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi",
                "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro",
                "status", "situacao_aparente", "odometro_horimetro", "local_verificado",
-               "observacoes", "vistoriador", "matricula", "inicio", "fim",
-               "latitude", "longitude", "precisao_m", "n_fotos", "etapas_puladas", "origem"]
+               "onde_utilizado", "motorista", "plotado", "placa_legivel", "estepe", "triangulo", "macaco",
+               "chave_de_roda", "observacoes", "vistoriador", "matricula", "inicio", "fim",
+               "latitude", "longitude", "precisao_m", "n_fotos", "etapas_puladas", "alertas", "origem"]
 
         def dec(x):
             return "" if x is None else str(round(x, 7)).replace(".", ",")
+
+        def sn(v, k):
+            o = v["itens_obj"]
+            return "" if not o else ("N/A" if o.get("na") else ("Sim" if o.get(k) else "Não"))
         linhas = []
         for v in vs:
             linhas.append([v["chave"], v["patrimonio"], v["placa"], v["tipo"], v["marca_modelo"],
                            v["ano"], v["chassi"], v["renavam"], v["secretaria"], v["local_cadastro"],
                            v["responsavel"], v["situacao_cadastro"], v["status"], v["situacao"],
-                           v["odometro"], v["local_visto"], v["obs"], v["vistoriador_nome"],
+                           v["odometro"], v["local_visto"], v["uso_local"], v["motorista"],
+                           v["plotado"], v["placa_legivel"], sn(v, "estepe"), sn(v, "triangulo"), sn(v, "macaco"),
+                           sn(v, "chave_roda"), v["obs"], v["vistoriador_nome"],
                            v["vistoriador_matricula"], v["inicio"], v["fim"], dec(v["lat"]),
-                           dec(v["lon"]), dec(v["acc"]), v["n_fotos"], ",".join(v["puladas_lista"]), v["origem"]])
+                           dec(v["lon"]), dec(v["acc"]), v["n_fotos"], ",".join(v["puladas_lista"]),
+                           "; ".join(v["alertas_texto"]), v["origem"]])
         nome = "frota_" + datetime.now().strftime("%Y%m%d_%H%M") + ".csv"
         self.enviar(csv_bytes(cab, linhas), "text/csv; charset=utf-8", 200,
                     {"Content-Disposition": f'attachment; filename="{nome}"'})
@@ -834,6 +965,11 @@ class Handler(BaseHTTPRequestHandler):
             nome = self.q.get("nome", "planilha.csv")
             with conexao() as c:
                 return self.json({"ok": True, **importar(c, nome, self.corpo)})
+        if p == "/api/zerar_banco":
+            self.exigir_admin()
+            if self.corpo_json().get("confirmacao") != "ZERAR":
+                raise RotaErro("Confirmação incorreta.")
+            return self.json({"ok": True, **zerar_banco()})
         if p == "/api/usuarios":
             self.exigir_admin()
             return self.criar_usuario()
@@ -991,6 +1127,8 @@ class Handler(BaseHTTPRequestHandler):
             if acao == "salvar":
                 gravar_cadastro(c, v, d)
                 sets = {k: txt(d[k]) for k in VIST if k in d}
+                if "itens" in d:
+                    sets["itens"] = limpar_itens(d["itens"])
                 if sets:
                     c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
                               [*sets.values(), vid])
@@ -1001,6 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not txt(d.get("situacao")):
                     raise RotaErro("Informe a situação aparente do veículo.")
                 sets = {k: txt(d.get(k)) for k in VIST}
+                if isinstance(d.get("itens"), dict):
+                    sets["itens"] = limpar_itens(d["itens"])
                 sets["status"] = "em_andamento" if v["status"] != "concluido" else v["status"]
                 if v["status"] == "pendente" or not v["vistoriador_nome"]:
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
@@ -1056,7 +1196,7 @@ class Handler(BaseHTTPRequestHandler):
                     apagar_arquivo_foto(v["chave"], f["arquivo"])
                 c.execute("DELETE FROM fotos WHERE veiculo_id=?", (vid,))
                 c.execute("UPDATE veiculos SET status='pendente', situacao=NULL, odometro=NULL, local_visto=NULL, "
-                          "obs=NULL, "
+                          "uso_local=NULL, motorista=NULL, plotado=NULL, placa_legivel=NULL, itens=NULL, obs=NULL, "
                           "vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL, "
                           "lat=NULL, lon=NULL, acc=NULL, puladas='[]', sem_avarias=0 WHERE id=?", (vid,))
                 pdf_path(v["chave"]).unlink(missing_ok=True)

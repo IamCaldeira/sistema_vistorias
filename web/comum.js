@@ -3,7 +3,18 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const STATUS = {pendente: 'Pendente', em_andamento: 'Em andamento', concluido: 'Concluído'};
+const ALERTAS = {
+  nao_localizado: ['fa-circle-question', 'Não localizado'],
+  campo: ['fa-circle-plus', 'Cadastrado em campo (não constava na lista)'],
+  sem_gps: ['fa-location-crosshairs', 'Sem GPS'],
+  gps_impreciso: ['fa-location-dot', 'GPS impreciso'],
+  puladas: ['fa-forward', 'Fotos puladas'],
+  avarias: ['fa-car-burst', 'Com avarias registradas'],
+  placa_ilegivel: ['fa-eye-slash', 'Placa ilegível'],
+  itens_faltando: ['fa-screwdriver-wrench', 'Item de segurança ausente (estepe, triângulo, macaco ou chave de roda)'],
+};
 const badge = s => `<span class="badge b-${s}">${STATUS[s] || s}</span>`;
+const icones = (lista) => (lista || []).map(a => ALERTAS[a] ? `<i class="fa-solid ${ALERTAS[a][0]} alerta a-${a}" title="${ALERTAS[a][1]}"></i>` : '').join('');
 
 async function api(url, opts = {}) {
   const r = await fetch(url, opts);

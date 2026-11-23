@@ -3,13 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b3d6b">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/web/icon-192.png">
 <title>Vistoria da Frota</title>
 <link rel="stylesheet" href="/web/estilo.css">
 </head>
 <body class="cel">
 <div class="barra">
   <img src="/web/brasao.png" alt="">
-  <div class="t">Vistoria da Frota<small id="quem"></small></div>
+  <div class="t">Vistoria da Frota<small id="quem"></small><small class="estado" id="estado"></small></div>
   <div class="dir">
     <span class="gps" id="gps">GPS...</span>
     <button class="btn sec peq" id="sair" title="Sair"><i class="fa-solid fa-right-from-bracket"></i> Sair</button>
@@ -20,12 +24,53 @@
 <script src="/web/comum.js"></script>
 <script>
 /* =====================================================================
-   Aplicativo do celular: cada ação é enviada na hora para o notebook.
-   (Precisa estar conectado ao hotspot do notebook o tempo todo.)
+   Aplicativo do celular - "local primeiro": tudo o que você faz é salvo no
+   próprio celular (IndexedDB) e enviado ao notebook em segundo plano.
+   Sem conexão, a vistoria continua normalmente e é enviada quando voltar.
    ===================================================================== */
+const req = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const IDB = (() => {
+  let dbp;
+  const abrir = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('frota', 1);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      d.createObjectStore('kv'); d.createObjectStore('veiculos', {keyPath: 'id'});
+      d.createObjectStore('fila', {keyPath: 'seq', autoIncrement: true});
+      d.createObjectStore('blobs'); d.createObjectStore('erros', {keyPath: 'seq', autoIncrement: true});
+    };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  async function tx(nomes, modo, fn) {   // dentro de fn, só aguarde requisições do IndexedDB
+    const d = await abrir(), t = d.transaction(nomes, modo), L = {};
+    nomes.forEach(n => L[n] = t.objectStore(n));
+    const fim = new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
+    fim.catch(() => {});
+    let out; try { out = await fn(L); } catch (e) { try { t.abort(); } catch (_) {} throw e; }
+    await fim; return out;
+  }
+  return {tx,
+    get: (s, k) => tx([s], 'readonly', L => req(L[s].get(k))),
+    put: (s, v, k) => tx([s], 'readwrite', L => req(k === undefined ? L[s].put(v) : L[s].put(v, k))),
+    del: (s, k) => tx([s], 'readwrite', L => req(L[s].delete(k))),
+    todos: s => tx([s], 'readonly', L => req(L[s].getAll())),
+    limpar: s => tx([s], 'readwrite', L => req(L[s].clear()))};
+})();
+
+/* ---------------- estado ---------------- */
 let usuario = null, cfg = null, pos = null, gpsErro = '', v = null, filtro = 'pendente', busca = '';
-const app = $('#app');
-const tratar = e => { if (e.sessao) { alert('Sessão expirada. Entre de novo.'); location.reload(); } else alert(e instanceof TypeError ? 'Sem conexão com o notebook.' : e.message); };
+let online = true, sessaoExpirada = false, sincP = null, ultimaSync = 0, idmapMem = {};
+const app = $('#app'), blobUrls = new Map();
+const pad = n => String(n).padStart(2, '0');
+const agoraStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const normJs = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const limparChave = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
+function calcChave(placa, pat) {
+  let p = limparChave(placa); if (['', 'SEMPLACA', 'SP', 'NA', 'NAO', 'NT', 'SPLACA'].includes(p)) p = '';
+  if (p) return p; const t = limparChave(pat); return t ? 'PAT' + t : '';
+}
+const tratar = e => { if (e.sessao) { sessaoExpirada = true; atualizaEstado(); alert('Sessão expirada. Feche e abra o aplicativo para entrar de novo (seus dados no celular são mantidos).'); } else alert(e.message); };
+const semRede = e => { if (e instanceof TypeError) online = false; if (e && e.sessao) sessaoExpirada = true; };
 
 /* ---------------- GPS ---------------- */
 function iniciarGPS() {
@@ -43,33 +88,281 @@ function atualizaGPS() {
   } else { el.textContent = gpsErro || 'GPS buscando...'; el.className = 'gps'; }
 }
 const gpsParams = () => (pos && Date.now() - pos.t < 120000) ? {lat: pos.lat, lon: pos.lon, acc: pos.acc} : {};
-setInterval(atualizaGPS, 2000);
+async function atualizaEstado() {
+  const fila = await IDB.todos('fila').catch(() => []);
+  const el = $('#estado'); let t = online ? 'Conectado ao notebook' : 'Sem conexão · trabalhando offline';
+  if (fila.length) t += ` · ${fila.length} envio(s) pendente(s)`;
+  if (sessaoExpirada) t = 'Sessão expirada · reabra o aplicativo';
+  el.textContent = t; el.className = 'estado' + (online && !sessaoExpirada ? '' : ' off');
+}
+setInterval(() => { atualizaGPS(); atualizaEstado(); }, 2000);
+$('#gps').onclick = () => { if (navigator.geolocation && window.isSecureContext) navigator.geolocation.getCurrentPosition(
+  p => { pos = {lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, t: Date.now()}; atualizaGPS(); },
+  () => { gpsErro = 'GPS sem sinal'; atualizaGPS(); }, {enableHighAccuracy: true, timeout: 20000}); };
 
 /* ---------------- início ---------------- */
-iniciarSessao(async eu => {
+iniciarSessao(async (eu, info) => {
   usuario = eu;
   $('#quem').textContent = `${eu.nome} · Mat. ${eu.matricula}`;
-  try { cfg = await api('/api/config'); } catch (e) { app.innerHTML = '<div class="aviso verm">Sem conexão com o notebook.</div>'; return; }
-  iniciarGPS(); atualizaGPS();
+  idmapMem = (await IDB.get('kv', 'idmap')) || {};
+  ultimaSync = (await IDB.get('kv', 'ultima')) || 0;
+  try { cfg = await api('/api/config'); localStorage.setItem('cfg', JSON.stringify(cfg)); online = true; }
+  catch (e) {
+    semRede(e); try { cfg = JSON.parse(localStorage.getItem('cfg')); } catch (_) {}
+    if (!cfg) { app.innerHTML = '<div class="aviso verm">Abra o aplicativo uma vez, conectado ao notebook, para baixar a lista de veículos.</div>'; return; }
+  }
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+  if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  iniciarGPS(); atualizaGPS(); atualizaEstado();
+  await sincronizar(true);
   telaLista();
+  setInterval(ciclo, 10000);
+  window.addEventListener('online', ciclo);
 });
-$('#sair').onclick = () => { if (confirm('Sair?')) sairDoSistema(); };
+$('#sair').onclick = async () => {
+  const n = (await IDB.todos('fila')).length;
+  if (!confirm(n ? `Há ${n} envio(s) pendente(s). Eles continuam salvos no celular e serão enviados quando você entrar de novo. Sair?` : 'Sair?')) return;
+  sairDoSistema();
+};
 
-/* ---------------- comunicação com o notebook ---------------- */
-const acao = async (nome, dados) => { v = (await post(`/api/veiculos/${v.id}/${nome}`, dados)).veiculo; return v; };
-async function enviarFoto(etapaId, file, legenda) {
-  const q = new URLSearchParams({id: v.id, etapa: etapaId, legenda: legenda || ''}), g = gpsParams();
-  if (g.lat != null) { q.set('lat', g.lat); q.set('lon', g.lon); q.set('acc', g.acc); }
-  v = (await api('/api/foto?' + q, {method: 'POST', headers: {'Content-Type': file.type || 'image/jpeg'}, body: file})).veiculo;
+/* ---------------- conexão e sincronização ---------------- */
+async function ping() {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 4000);
+  try { const r = await fetch('/api/eu', {cache: 'no-store', signal: ctl.signal}); online = true; sessaoExpirada = r.status === 401; }
+  catch (e) { online = false; } finally { clearTimeout(t); }
+  return online;
 }
-const srcFoto = (f, w) => `${f.url}?w=${w}`;
+async function ciclo() {
+  await ping();
+  if (online && !sessaoExpirada) {
+    const n = (await IDB.todos('fila')).length;
+    if (n > 0 || Date.now() - ultimaSync > 120000) await sincronizar(true);
+  }
+  atualizaEstado();
+}
+function sincronizar(forcarDownload = false) {
+  if (sincP) return sincP;
+  sincP = (async () => {
+    try {
+      for (let i = 0; i < 4; i++) {
+        const parou = await enviarFila();
+        if (parou || !online || sessaoExpirada) break;
+        if ((await IDB.todos('fila')).length === 0) break;
+      }
+      if (online && !sessaoExpirada && (forcarDownload || Date.now() - ultimaSync > 90000)) {
+        try { await baixarTudo(); } catch (e) { semRede(e); }
+      }
+    } catch (e) { semRede(e); }
+    finally { sincP = null; atualizaEstado(); }
+  })();
+  return sincP;
+}
+async function baixarTudo() {
+  const j = await api('/api/veiculos?completo=1');
+  await IDB.tx(['veiculos', 'fila'], 'readwrite', async L => {
+    const fila = await req(L.fila.getAll()), pend = new Set(fila.map(o => idmapMem[o.vid] ?? o.vid));
+    const ids = new Set();
+    for (const sv of j.veiculos) { ids.add(sv.id); if (!pend.has(sv.id)) await req(L.veiculos.put(sv)); }
+    for (const lv of await req(L.veiculos.getAll()))
+      if (lv.id > 0 && !ids.has(lv.id) && !pend.has(lv.id)) await req(L.veiculos.delete(lv.id));   // excluído no painel
+  });
+  ultimaSync = Date.now(); await IDB.put('kv', ultimaSync, 'ultima');
+}
+async function moverErro(op, msg) {
+  await IDB.tx(['fila', 'erros'], 'readwrite', async L => { await req(L.erros.add({op, msg, quando: agoraStr()})); await req(L.fila.delete(op.seq)); });
+}
+async function executarOp(op, vid) {
+  const P = (acao, dados) => post(`/api/veiculos/${vid}/${acao}`, dados);
+  switch (op.tipo) {
+    case 'novo_veiculo': {
+      const j = await post('/api/veiculos', op.dados);
+      idmapMem[op.vid] = j.id; await IDB.put('kv', idmapMem, 'idmap');
+      const loc = await IDB.get('veiculos', op.vid);
+      if (loc) { await IDB.tx(['veiculos'], 'readwrite', async L => { await req(L.veiculos.delete(op.vid)); loc.id = j.id; loc.chave = j.chave; await req(L.veiculos.put(loc)); }); }
+      return;
+    }
+    case 'iniciar': return P('iniciar', op.dados);
+    case 'pular': return P('pular', {etapa: op.etapa});
+    case 'sem_avarias': return P('sem_avarias', {});
+    case 'refazer_etapa': return P('refazer_etapa', {etapa: op.etapa});
+    case 'reiniciar': return P('reiniciar', {});
+    case 'apagar_foto': return post(`/api/foto/${op.fotoId}/apagar`, {});
+    case 'concluir': {
+      const j = await P('concluir', {quando: op.quando});
+      await IDB.put('kv', {pdf: j.pdf || null, pdf_erro: j.pdf_erro || null}, 'res:' + op.vid); return j;
+    }
+    case 'foto': {
+      const blob = await IDB.get('blobs', 'foto:' + op.fotoId);
+      if (!blob) return;
+      const q = new URLSearchParams({id: vid, etapa: op.etapa, legenda: op.legenda || '', quando: op.quando});
+      if (op.lat != null) { q.set('lat', op.lat); q.set('lon', op.lon); if (op.acc != null) q.set('acc', op.acc); }
+      await api('/api/foto?' + q, {method: 'POST', headers: {'Content-Type': blob.type || 'image/jpeg'}, body: blob});
+      await IDB.del('blobs', 'foto:' + op.fotoId); return;
+    }
+  }
+}
+async function enviarFila() {   // devolve true se parou por falta de rede/sessão
+  const fila = (await IDB.todos('fila')).sort((a, b) => a.seq - b.seq), falhos = new Set(), tocados = new Set();
+  for (const op of fila) {
+    const vid = idmapMem[op.vid] ?? op.vid;
+    if (falhos.has(op.vid)) { await moverErro(op, 'Não enviada porque uma operação anterior do mesmo veículo falhou.'); continue; }
+    try { await executarOp(op, vid); await IDB.del('fila', op.seq); tocados.add(op.vid); online = true; }
+    catch (e) {
+      if (e.sessao) { sessaoExpirada = true; return true; }
+      if (e instanceof TypeError) { online = false; return true; }
+      if (op.tipo === 'apagar_foto' && /não encontrad/i.test(e.message)) { await IDB.del('fila', op.seq); continue; }
+      falhos.add(op.vid); await moverErro(op, e.message);
+    }
+  }
+  for (const ov of tocados) {      // traz o estado oficial do servidor (ids das fotos etc.)
+    const rid = idmapMem[ov] ?? ov;
+    try {
+      const j = await api('/api/veiculos/' + rid);
+      await IDB.tx(['veiculos', 'fila'], 'readwrite', async L => {
+        const resto = (await req(L.fila.getAll())).some(o => (idmapMem[o.vid] ?? o.vid) === rid);
+        if (!resto) await req(L.veiculos.put(j.veiculo));
+      });
+    } catch (e) { semRede(e); if (!online) return true; }
+  }
+  return false;
+}
+
+/* ---------------- modelo local do veículo ---------------- */
+function calcEtapas(x) {
+  const cont = {}; (x.fotos || []).forEach(f => cont[f.etapa] = (cont[f.etapa] || 0) + 1);
+  const pul = new Set(x.puladas_lista || []);
+  return cfg.etapas.map(e => ({id: e.id, titulo: e.titulo, multi: !!e.multi, avarias: !!e.avarias, dica: e.dica || '', n: cont[e.id] || 0,
+    status: cont[e.id] ? 'ok' : (e.avarias && x.sem_avarias) ? 'sem_avarias' : pul.has(e.id) ? 'pulada' : 'pendente'}));
+}
+function recalc(x) {
+  x.fotos = x.fotos || []; x.puladas_lista = x.puladas_lista || [];
+  x.etapas = calcEtapas(x); x.etapas_total = x.etapas.length; x.etapas_feitas = x.etapas.filter(e => e.status !== 'pendente').length;
+  x.n_fotos = x.fotos.length;
+  const a = [], o = x.itens_obj;
+  if (x.situacao === 'Não localizado') a.push('nao_localizado');
+  if (x.origem === 'campo') a.push('campo');
+  if (x.status !== 'pendente' && x.situacao !== 'Não localizado' && x.lat == null) a.push('sem_gps');
+  if (x.acc != null && x.acc > (cfg.gps_ruim || 50)) a.push('gps_impreciso');
+  if (x.puladas_lista.length) a.push('puladas');
+  if (x.fotos.some(f => f.etapa === 'avarias')) a.push('avarias');
+  if (x.placa_legivel === 'Não') a.push('placa_ilegivel');
+  if (o && x.situacao !== 'Não localizado' && !o.na && !cfg.itens.every(i => o[i.id])) a.push('itens_faltando');
+  x.alertas = a;
+}
+async function atual() {   // recarrega o veículo aberto do armazenamento local (a sincronização pode tê-lo atualizado)
+  const id = idmapMem[v.id] ?? v.id, x = await IDB.get('veiculos', id);
+  if (x) v = x; return v;
+}
+const enf = (L, vo, op) => req(L.fila.add({...op, vid: vo.id, t: Date.now()}));
+async function mutar(x, fn) {      // salva o veículo e (opcional) altera a fila numa única transação
+  await IDB.tx(['veiculos', 'fila', 'blobs'], 'readwrite', async L => {
+    if (fn) await fn(L); recalc(x); await req(L.veiculos.put(structuredClone(x)));
+  });
+  sincronizar();
+}
+async function opsPendentes(L, vid, filtroFn) { return (await req(L.fila.getAll())).filter(o => o.vid === vid && filtroFn(o)); }
+async function removerOps(L, ops) {
+  for (const o of ops) { await req(L.fila.delete(o.seq)); if (o.fotoId) await req(L.blobs.delete('foto:' + o.fotoId)); }
+}
+
+async function opIniciar(d) {
+  await atual(); const eraPendente = v.status === 'pendente';
+  Object.assign(v, {situacao: d.situacao, odometro: d.odometro, local_visto: d.local_visto, uso_local: d.uso_local,
+                    motorista: d.motorista, plotado: d.plotado, placa_legivel: d.placa_legivel, obs: d.obs, itens_obj: d.itens});
+  Object.entries(d.cadastro || {}).forEach(([k, val]) => v[k] = val);
+  v.chave = calcChave(v.placa, v.patrimonio) || v.chave;
+  if (v.status !== 'concluido') v.status = 'em_andamento';
+  if (eraPendente || !v.vistoriador_nome) { v.vistoriador_nome = usuario.nome; v.vistoriador_matricula = usuario.matricula; }
+  if (!v.inicio) v.inicio = agoraStr();
+  const g = gpsParams(); if (g.lat != null) { v.lat = g.lat; v.lon = g.lon; v.acc = g.acc; }
+  await mutar(v, L => enf(L, v, {tipo: 'iniciar', dados: {...d, ...g, quando: agoraStr()}}));
+}
+async function opFoto(etapaId, file, legenda) {
+  await atual(); const e = cfg.etapas.find(x => x.id === etapaId), id = 'l' + Date.now() + Math.random().toString(36).slice(2, 6);
+  await mutar(v, async L => {
+    if (!e.multi) {
+      await removerOps(L, await opsPendentes(L, v.id, o => o.tipo === 'foto' && o.etapa === etapaId));
+      v.fotos = v.fotos.filter(f => f.etapa !== etapaId);      // as do servidor são substituídas no envio
+    }
+    const seq = Math.max(0, ...v.fotos.filter(f => f.etapa === etapaId).map(f => f.seq || 0)) + 1, g = gpsParams();
+    v.fotos.push({id, local: true, etapa: etapaId, seq, legenda, lat: g.lat ?? null, lon: g.lon ?? null, acc: g.acc ?? null, criado_em: agoraStr(), url: null, arquivo: ''});
+    v.puladas_lista = v.puladas_lista.filter(x => x !== etapaId); if (e.avarias) v.sem_avarias = 0;
+    if (v.status === 'pendente') v.status = 'em_andamento';
+    await req(L.blobs.put(file, 'foto:' + id));
+    await enf(L, v, {tipo: 'foto', etapa: etapaId, legenda, fotoId: id, quando: agoraStr(), ...g});
+  });
+}
+async function opPular(etapaId) {
+  await atual(); if (!v.puladas_lista.includes(etapaId)) v.puladas_lista.push(etapaId);
+  await mutar(v, L => enf(L, v, {tipo: 'pular', etapa: etapaId}));
+}
+async function opSemAvarias() { await atual(); v.sem_avarias = 1; await mutar(v, L => enf(L, v, {tipo: 'sem_avarias'})); }
+async function opRefazer(etapaId) {
+  await atual();
+  await mutar(v, async L => {
+    await removerOps(L, await opsPendentes(L, v.id, o => o.tipo === 'foto' && o.etapa === etapaId));
+    v.fotos = v.fotos.filter(f => f.etapa !== etapaId); v.puladas_lista = v.puladas_lista.filter(x => x !== etapaId);
+    if (etapaId === 'avarias') v.sem_avarias = 0; if (v.status === 'concluido') v.status = 'em_andamento';
+    await enf(L, v, {tipo: 'refazer_etapa', etapa: etapaId});
+  });
+}
+async function opApagarFoto(f) {
+  await atual(); const alvo = v.fotos.find(x => String(x.id) === String(f.id)); if (!alvo) return;
+  await mutar(v, async L => {
+    v.fotos = v.fotos.filter(x => x !== alvo && String(x.id) !== String(f.id));
+    if (alvo.local) await removerOps(L, await opsPendentes(L, v.id, o => o.tipo === 'foto' && o.fotoId === alvo.id));
+    else await enf(L, v, {tipo: 'apagar_foto', fotoId: alvo.id});
+    if (v.status === 'concluido') v.status = 'em_andamento';
+  });
+}
+async function opConcluir() {
+  await atual(); recalc(v);
+  if (!v.situacao) throw new Error('Informe a situação aparente antes de concluir.');
+  if (v.situacao !== 'Não localizado') {
+    const faltam = v.etapas.filter(e => e.status === 'pendente').map(e => e.titulo);
+    if (faltam.length) throw new Error('Faltam etapas: ' + faltam.join('; '));
+  }
+  const idOrig = v.id; v.status = 'concluido'; v.fim = agoraStr();
+  if (!v.vistoriador_nome) { v.vistoriador_nome = usuario.nome; v.vistoriador_matricula = usuario.matricula; }
+  await mutar(v, L => enf(L, v, {tipo: 'concluir', quando: v.fim}));
+  await sincronizar();
+  const res = await IDB.get('kv', 'res:' + idOrig); if (res) await IDB.del('kv', 'res:' + idOrig);
+  return res || null;
+}
+async function opReiniciar() {
+  await atual();
+  await mutar(v, async L => {
+    await removerOps(L, await opsPendentes(L, v.id, () => true));
+    Object.assign(v, {status: 'pendente', situacao: '', odometro: '', local_visto: '', uso_local: '', motorista: '', plotado: '', placa_legivel: '', obs: '',
+      itens_obj: null, fotos: [], puladas_lista: [], sem_avarias: 0, vistoriador_nome: null, vistoriador_matricula: null,
+      inicio: null, fim: null, lat: null, lon: null, acc: null});
+    await enf(L, v, {tipo: 'reiniciar'});
+  });
+}
+async function opNovoVeiculo(d) {
+  const chave = calcChave(d.placa, d.patrimonio);
+  if (!chave) throw new Error('Informe a placa ou o nº de patrimônio.');
+  if ((await IDB.todos('veiculos')).some(x => x.chave === chave)) throw new Error(`Já existe um veículo com a identificação ${chave}.`);
+  const nv = {id: -Date.now(), chave, origem: 'campo', status: 'pendente', fotos: [], puladas_lista: [], sem_avarias: 0, itens_obj: null, pdf: false, ...d};
+  delete nv.origem; nv.origem = 'campo';
+  await mutar(nv, L => req(L.fila.add({tipo: 'novo_veiculo', vid: nv.id, dados: {...d, origem: 'campo'}, t: Date.now()})));
+  return nv;
+}
+async function prepararUrls() {
+  for (const f of v.fotos) if (f.local && !blobUrls.has(f.id)) { const b = await IDB.get('blobs', 'foto:' + f.id); if (b) blobUrls.set(f.id, URL.createObjectURL(b)); }
+}
+const srcFoto = (f, w) => f.local ? (blobUrls.get(f.id) || '') : `${f.url}?w=${w}`;
 
 /* ---------------- lista ---------------- */
-function telaLista() {
+async function telaLista() {
   v = null;
+  const erros = await IDB.todos('erros'), fila = await IDB.todos('fila');
   let aviso = '';
-  if (!window.isSecureContext) aviso += `<div class="aviso"><i class="fa-solid fa-location-dot"></i> Sem conexão segura: o GPS fica desativado.
+  if (!window.isSecureContext) aviso += `<div class="aviso"><i class="fa-solid fa-location-dot"></i> Sem conexão segura: o GPS e o modo offline ficam desativados.
     <a href="/certificado">Instalar o certificado</a></div>`;
+  if (!online) aviso += `<div class="aviso"><i class="fa-solid fa-plane"></i> Sem conexão com o notebook. Você pode continuar vistoriando: tudo fica salvo no celular e é enviado quando a conexão voltar.</div>`;
+  if (erros.length) aviso += `<div class="aviso verm"><i class="fa-solid fa-triangle-exclamation"></i> ${erros.length} alteração(ões) não puderam ser enviadas.
+    <a href="#" id="verErros">Ver detalhes</a> · <a href="#" id="descErros">Descartar</a></div>`;
   const seg = [['pendente', 'Pendentes'], ['em_andamento', 'Em and.'], ['concluido', 'Feitos'], ['todos', 'Todos']];
   app.innerHTML = `${aviso}
     <input type="text" id="busca" placeholder="Placa (finais), patrimônio, modelo..." value="${esc(busca)}">
@@ -78,26 +371,29 @@ function telaLista() {
     <div class="rodape-lista" id="rodape"></div>
     <div class="rodape-fixo"><button class="btn cinza" id="novo"><i class="fa-solid fa-circle-plus"></i> Veículo fora da lista</button></div>`;
   $$('.seg button').forEach(b => b.onclick = () => { filtro = b.dataset.f; telaLista(); });
-  let deb; $('#busca').oninput = e => { busca = e.target.value; clearTimeout(deb); deb = setTimeout(carregarLista, 250); };
+  let deb; $('#busca').oninput = e => { busca = e.target.value; clearTimeout(deb); deb = setTimeout(carregarLista, 200); };
   $('#novo').onclick = telaNovo;
-  carregarLista();
+  if ($('#verErros')) $('#verErros').onclick = e => { e.preventDefault(); alert(erros.map(x => `• ${x.op.tipo} — ${x.msg}`).join('\n')); };
+  if ($('#descErros')) $('#descErros').onclick = async e => { e.preventDefault(); if (confirm('Descartar essas alterações que falharam?')) { await IDB.limpar('erros'); telaLista(); } };
+  carregarLista(fila.length);
 }
-async function carregarLista() {
-  let ok;
-  try { ok = (await api('/api/veiculos?' + new URLSearchParams({q: busca, filtro}))).veiculos; }
-  catch (e) { const el = $('#lista'); if (el) el.innerHTML = `<div class="aviso verm">${e instanceof TypeError ? 'Sem conexão com o notebook.' : esc(e.message)}</div>`; return; }
+async function carregarLista(nFila) {
+  const todos = (await IDB.todos('veiculos')).sort((a, b) => a.chave.localeCompare(b.chave)), q = normJs(busca);
+  const ok = todos.filter(x => (filtro === 'todos' || x.status === filtro) &&
+    (!q || normJs([x.chave, x.patrimonio, x.placa, x.marca_modelo, x.secretaria, x.tipo].join(' ')).includes(q)));
   const el = $('#lista'); if (!el) return;
   el.innerHTML = ok.length ? ok.slice(0, 60).map(x => `
       <a class="item" data-id="${x.id}"><div class="l1"><b>${esc(x.chave)}</b>${badge(x.status)}</div>
       <div>${esc(x.marca_modelo) || '<i>sem descrição</i>'}</div>
       <small>${esc(x.secretaria)}${x.local_cadastro ? ' · ' + esc(x.local_cadastro) : ''}</small> ${icones(x.alertas)}</a>`).join('')
     + (ok.length > 60 ? `<div class="dica">Mostrando 60 de ${ok.length}. Use a busca.</div>` : '')
-    : '<div class="dica">Nenhum veículo encontrado.</div>';
+    : `<div class="dica">${todos.length ? 'Nenhum veículo encontrado.' : 'Nenhum veículo salvo no celular ainda. Conecte-se ao notebook para baixar a lista.'}</div>`;
   $$('#lista .item').forEach(a => a.onclick = () => telaVeiculo(+a.dataset.id));
   const r = $('#rodape'); if (r) {
-    r.innerHTML = `<button id="atualizar">Atualizar</button> · <button id="trocaSenha">Alterar minha senha</button>
+    r.innerHTML = `${todos.length} veículo(s) no celular${ultimaSync ? ' · atualizado às ' + new Date(ultimaSync).toTimeString().slice(0, 5) : ''}<br>
+      <button id="atualizar">Atualizar agora</button> · <button id="trocaSenha">Alterar minha senha</button>
       · <a href="/">Abrir painel</a>`;
-    $('#atualizar').onclick = carregarLista;
+    $('#atualizar').onclick = async () => { if (!(await ping())) { alert('Sem conexão com o notebook.'); atualizaEstado(); return; } await sincronizar(true); telaLista(); };
     $('#trocaSenha').onclick = abrirAlterarSenha;
   }
 }
@@ -108,7 +404,12 @@ const CAMPOS_CAD = [['patrimonio', 'Nº de patrimônio'], ['placa', 'Placa'], ['
   ['renavam', 'Renavam'], ['secretaria', 'Secretaria'], ['responsavel', 'Responsável / Motorista']];
 
 async function telaVeiculo(id) {
-  try { v = (await api('/api/veiculos/' + id)).veiculo; } catch (e) { tratar(e); return telaLista(); }
+  v = await IDB.get('veiculos', id);
+  if (online && !sessaoExpirada && v && !(await IDB.todos('fila')).some(o => (idmapMem[o.vid] ?? o.vid) === id)) {
+    try { const j = await api('/api/veiculos/' + id); v = j.veiculo; await IDB.put('veiculos', v); } catch (e) { semRede(e); }
+  }
+  if (!v) { alert('Veículo não encontrado no celular.'); return telaLista(); }
+  recalc(v);
   const linha = (r, x) => x ? `<div><span>${r}</span><b>${esc(x)}</b></div>` : '';
   const sit = ['', ...cfg.situacoes].map(s => `<option ${s === (v.situacao || '') ? 'selected' : ''}>${esc(s)}</option>`).join('');
   const io = v.itens_obj || {};
@@ -151,7 +452,7 @@ async function telaVeiculo(id) {
   if ($('#verRev')) $('#verRev').onclick = telaRevisao;
   if ($('#refazer')) $('#refazer').onclick = async () => {
     if (!confirm('Apagar todas as fotos e refazer a vistoria deste veículo?')) return;
-    try { await acao('reiniciar'); telaVeiculo(v.id); } catch (e) { tratar(e); }
+    try { await opReiniciar(); telaVeiculo(v.id); } catch (e) { tratar(e); }
   };
   if ($('#item-na')) {
     const sync = () => $$('[data-item]').forEach(cb => { cb.disabled = $('#item-na').checked; if ($('#item-na').checked) cb.checked = false; });
@@ -164,7 +465,7 @@ async function telaVeiculo(id) {
                    uso_local: $('#f-uso').value, motorista: $('#f-motorista').value, plotado: $('#f-plotado').value, placa_legivel: $('#f-placaleg').value,
                    obs: $('#f-obs').value, itens, cadastro};
     if (!dados.situacao) { $('#msg').textContent = 'Escolha a situação aparente.'; return; }
-    try { await acao('iniciar', dados); if (v.situacao === 'Não localizado') telaRevisao(); else proxima(); }
+    try { await opIniciar(dados); if (v.situacao === 'Não localizado') telaRevisao(); else proxima(); }
     catch (e) { $('#msg').textContent = e.message; }
   };
 }
@@ -174,10 +475,11 @@ function proxima() { const i = v.etapas.findIndex(e => e.status === 'pendente');
 const avancar = idx => idx + 1 >= v.etapas.length ? telaRevisao() : telaFoto(idx + 1);
 function miniaturas(fotos, apagavel) {
   return fotos.length ? `<div class="miniaturas">${fotos.map(f => `<figure><img src="${srcFoto(f, 300)}" alt="" onerror="this.style.visibility='hidden'">
-    <figcaption>${esc(f.legenda) || '&nbsp;'}</figcaption>
+    <figcaption>${esc(f.legenda) || '&nbsp;'}${f.local ? ' <i class="fa-solid fa-clock" title="Aguardando envio"></i>' : ''}</figcaption>
     ${apagavel ? `<button class="x" data-del="${f.id}"><i class="fa-solid fa-xmark"></i></button>` : ''}</figure>`).join('')}</div>` : '';
 }
 async function telaFoto(idx) {
+  await atual(); await prepararUrls();
   const e = v.etapas[idx], fotos = v.fotos.filter(f => f.etapa === e.id), n = v.etapas.length, temFoto = fotos.length > 0;
   let botoes;
   if (e.multi) {
@@ -206,17 +508,17 @@ async function telaFoto(idx) {
     const f = ev.target.files[0]; if (!f) return;
     if (e.multi) return previaFoto(idx, f);
     $$('.btn').forEach(b => b.disabled = true); erro('Salvando foto...');
-    try { await enviarFoto(e.id, f, ''); avancar(idx); } catch (er) { $$('.btn').forEach(b => b.disabled = false); erro(er.message); }
+    try { await opFoto(e.id, f, ''); avancar(idx); } catch (er) { $$('.btn').forEach(b => b.disabled = false); erro(er.message); }
   };
   if ($('#concluirEtapa')) $('#concluirEtapa').onclick = () => avancar(idx);
   if ($('#pular')) $('#pular').onclick = async () => {
     if (!confirm('Pular: ' + e.titulo + '?')) return;
-    try { await acao('pular', {etapa: e.id}); avancar(idx); } catch (er) { tratar(er); }
+    try { await opPular(e.id); avancar(idx); } catch (er) { tratar(er); }
   };
-  if ($('#semAv')) $('#semAv').onclick = async () => { try { await acao('sem_avarias'); avancar(idx); } catch (er) { tratar(er); } };
+  if ($('#semAv')) $('#semAv').onclick = async () => { try { await opSemAvarias(); avancar(idx); } catch (er) { tratar(er); } };
   $$('[data-del]').forEach(b => b.onclick = async () => {
     if (!confirm('Apagar esta foto?')) return;
-    try { v = (await post(`/api/foto/${b.dataset.del}/apagar`)).veiculo; telaFoto(idx); } catch (er) { tratar(er); }
+    try { await opApagarFoto({id: b.dataset.del}); telaFoto(idx); } catch (er) { tratar(er); }
   });
 }
 function previaFoto(idx, file) {
@@ -231,7 +533,7 @@ function previaFoto(idx, file) {
     <div id="msg" class="erro"></div>`;
   const salvar = async depois => {
     $$('.btn').forEach(b => b.disabled = true); $('#msg').textContent = 'Salvando foto...';
-    try { await enviarFoto(e.id, file, $('#legenda').value); URL.revokeObjectURL(url); depois(); }
+    try { await opFoto(e.id, file, $('#legenda').value); URL.revokeObjectURL(url); depois(); }
     catch (er) { $$('.btn').forEach(b => b.disabled = false); $('#msg').textContent = er.message; }
   };
   $('#maisUma').onclick = () => salvar(() => telaFoto(idx));
@@ -241,6 +543,7 @@ function previaFoto(idx, file) {
 
 /* ---------------- revisão e conclusão ---------------- */
 async function telaRevisao() {
+  await atual(); await prepararUrls();
   const naoLoc = v.situacao === 'Não localizado', faltam = v.etapas.filter(e => e.status === 'pendente');
   const linhas = naoLoc ? '' : v.etapas.map((e, i) => {
     const fotos = v.fotos.filter(f => f.etapa === e.id);
@@ -269,17 +572,21 @@ async function telaRevisao() {
   $('#voltar').onclick = telaLista;
   $$('[data-ir]').forEach(b => b.onclick = async () => {
     const i = +b.dataset.ir, e = v.etapas[i];
-    try { if (e.status !== 'pendente') await acao('refazer_etapa', {etapa: e.id}); telaFoto(i); } catch (er) { tratar(er); }
+    try { if (e.status !== 'pendente') await opRefazer(e.id); telaFoto(i); } catch (er) { tratar(er); }
   });
   $('#concluir').onclick = async ev => {
     const b = ev.currentTarget; b.disabled = true; b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
-    try { telaFim(await post(`/api/veiculos/${v.id}/concluir`)); }
+    try { telaFim(await opConcluir()); }
     catch (er) { b.disabled = false; er.sessao ? tratar(er) : $('#msg').textContent = er.message; }
   };
 }
-function telaFim(res) {
-  const bloco = res.pdf ? `<a class="btn cinza" href="${res.pdf}" target="_blank"><i class="fa-solid fa-file-pdf"></i> Abrir relatório PDF</a>`
-    : `<div class="aviso">Vistoria salva, mas o PDF não foi gerado: ${esc(res.pdf_erro)}<br>Gere pelo painel.</div>`;
+async function telaFim(res) {
+  const pend = (await IDB.todos('fila')).length;
+  let bloco;
+  if (res && res.pdf) bloco = `<a class="btn cinza" href="${res.pdf}" target="_blank"><i class="fa-solid fa-file-pdf"></i> Abrir relatório PDF</a>`;
+  else if (res && res.pdf_erro) bloco = `<div class="aviso">Vistoria salva no notebook, mas o PDF não foi gerado: ${esc(res.pdf_erro)}<br>Gere pelo painel.</div>`;
+  else bloco = `<div class="aviso"><i class="fa-solid fa-cloud-arrow-up"></i> Vistoria <b>salva no celular</b>. Ela será enviada ao notebook (e o relatório PDF gerado) assim que houver conexão.
+    ${pend ? `<br>Envios pendentes: <b>${pend}</b>.` : ''}</div>`;
   app.innerHTML = `<div class="grande"><i class="fa-solid fa-circle-check"></i><br>Vistoria concluída!</div>
     <div class="dica">${esc(v.chave)}</div>${bloco}
     <button class="btn verde" id="prox"><i class="fa-solid fa-arrow-right"></i> Próximo veículo</button>`;
@@ -304,7 +611,7 @@ function telaNovo() {
   $('#voltar').onclick = telaLista;
   $('#cad').onclick = async () => {
     const d = {}; $$('[data-k]').forEach(el => d[el.dataset.k] = el.value.trim());
-    try { const nv = await post('/api/veiculos', {...d, origem: 'campo'}); telaVeiculo(nv.id); } catch (e) { $('#msg').textContent = e.message; }
+    try { const nv = await opNovoVeiculo(d); telaVeiculo(nv.id); } catch (e) { $('#msg').textContent = e.message; }
   };
 }
 </script>

@@ -212,8 +212,8 @@ async function montarQR() {
   $('#qrimg').innerHTML = cfg.qr_ok ? `<img alt="QR Code" src="/qr.svg?url=${encodeURIComponent(u.celular)}">`
     : '<div class="leg">QR Code indisponível. Rode instalar.bat (pacote segno).</div>';
   $('#qraviso').innerHTML = cfg.https_ativo
-    ? '<span><i class="fa-solid fa-lock"></i> HTTPS ativo (GPS liberado).</span>'
-    : '<span><i class="fa-solid fa-triangle-exclamation"></i> HTTPS desativado: sem GPS no celular.</span>';
+    ? '<span><i class="fa-solid fa-lock"></i> HTTPS ativo (GPS e modo offline liberados).</span>'
+    : '<span><i class="fa-solid fa-triangle-exclamation"></i> HTTPS desativado: sem GPS e sem modo offline no celular.</span>';
   $('#qrCertBtn').style.display = cfg.https_ativo ? 'inline' : 'none';
   $('#qrCert').innerHTML = cfg.qr_ok
     ? `<div>Na 1ª vez, aponte a câmera aqui e siga as instruções (instala o certificado):</div><img alt="QR do certificado" src="/qr.svg?url=${encodeURIComponent(u.certificado)}"><div class="url">${esc(u.certificado)}</div>`

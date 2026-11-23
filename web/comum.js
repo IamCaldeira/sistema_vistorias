@@ -26,7 +26,10 @@ async function api(url, opts = {}) {
 }
 const post = (url, dados) => api(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dados || {})});
 
-/* Login (matrícula + senha). Na primeira vez, cria o administrador. */
+const usuarioSalvo = () => { try { return JSON.parse(localStorage.getItem('usuario')); } catch (e) { return null; } };
+
+/* Login (matrícula + senha). Na primeira vez, cria o administrador.
+   Sem conexão com o notebook, reaproveita o último usuário (modo offline do celular). */
 function iniciarSessao(aoEntrar) {
   let tela = $('#login');
   if (!tela) {
@@ -47,9 +50,10 @@ function iniciarSessao(aoEntrar) {
         <button class="btn" type="submit"><i class="fa-solid fa-user-shield"></i> Criar administrador</button></form></div>`;
     document.body.appendChild(tela);
   }
-  const entrar = u => {
+  const entrar = (u, info) => {
+    try { localStorage.setItem('usuario', JSON.stringify(u)); } catch (e) {}
     document.body.classList.add('perfil-' + (u.perfil || 'vistoriador'));
-    tela.style.display = 'none'; aoEntrar(u);
+    tela.style.display = 'none'; aoEntrar(u, info || {});
   };
   const mostrar = modo => {
     $('#lg-login').style.display = modo === 'login' ? 'block' : 'none';
@@ -69,12 +73,18 @@ function iniciarSessao(aoEntrar) {
     catch (e) { $('#st-erro').textContent = e.message; }
   };
   api('/api/eu').then(j => entrar(j.usuario)).catch(async e => {
-    try { mostrar((await api('/api/login_info')).precisa_admin ? 'setup' : 'login'); }
-    catch (_) { mostrar('login'); $('#lg-erro').textContent = 'Sem conexão com o notebook.'; }
+    if (e.sessao) {
+      try { mostrar((await api('/api/login_info')).precisa_admin ? 'setup' : 'login'); } catch (_) { mostrar('login'); }
+    } else {
+      const salvo = usuarioSalvo();
+      if (salvo) entrar(salvo, {offline: true});
+      else { mostrar('login'); $('#lg-erro').textContent = 'Sem conexão com o notebook.'; }
+    }
   });
 }
 async function sairDoSistema() {
   try { await post('/api/logout'); } catch (e) {}
+  try { localStorage.removeItem('usuario'); } catch (e) {}
   location.reload();
 }
 

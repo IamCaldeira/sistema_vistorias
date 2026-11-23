@@ -711,6 +711,15 @@ def tipo_imagem(dados):
     return "jpg"
 
 
+QUANDO_RE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
+
+
+def quando_valido(s):
+    """Hora informada pelo celular (vistoria feita offline); senão, a do servidor."""
+    s = txt(s)
+    return s if QUANDO_RE.match(s) else agora()
+
+
 def admins_ativos(c, excluir_id=0):
     return c.execute("SELECT COUNT(*) FROM usuarios WHERE perfil='admin' AND ativo=1 "
                      "AND senha_hash IS NOT NULL AND id<>?", (excluir_id,)).fetchone()[0]
@@ -874,6 +883,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.arquivo(WEB / "painel.html")
         if p in ("/m", "/m/"):
             return self.arquivo(WEB / "celular.html")
+        if p == "/sw.js":  # service worker na raiz: controla todo o site
+            return self.arquivo(WEB / "sw.js", extra={"Service-Worker-Allowed": "/"})
+        if p == "/manifest.webmanifest":
+            return self.arquivo(WEB / "manifest.webmanifest", tipo="application/manifest+json")
         if p == "/certificado":
             return self.arquivo(WEB / "certificado.html")
         if p == "/ca.crt":
@@ -1269,7 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
                 if v["status"] == "pendente" or not v["vistoriador_nome"]:
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
                 if not v["inicio"]:
-                    sets["inicio"] = agora()
+                    sets["inicio"] = quando_valido(d.get("quando"))
                 if num(d.get("lat")) is not None and num(d.get("lon")) is not None:
                     sets["lat"], sets["lon"], sets["acc"] = num(d["lat"]), num(d["lon"]), num(d.get("acc"))
                 c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
@@ -1299,7 +1312,7 @@ class Handler(BaseHTTPRequestHandler):
                               if e["status"] == "pendente"]
                     if faltam:
                         raise RotaErro("Faltam etapas: " + "; ".join(faltam))
-                sets = {"status": "concluido", "fim": agora()}
+                sets = {"status": "concluido", "fim": quando_valido(d.get("quando"))}
                 if not v["vistoriador_nome"]:
                     sets["vistoriador_nome"], sets["vistoriador_matricula"] = u["nome"], u["matricula"]
                 c.execute(f"UPDATE veiculos SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
@@ -1358,7 +1371,7 @@ class Handler(BaseHTTPRequestHandler):
             c.execute("INSERT INTO fotos(veiculo_id, etapa, seq, arquivo, legenda, lat, lon, acc, criado_em, usuario) "
                       "VALUES(?,?,?,?,?,?,?,?,?,?)",
                       (vid, etapa, seq, nome, txt(self.q.get("legenda")), num(self.q.get("lat")),
-                       num(self.q.get("lon")), num(self.q.get("acc")), agora(),
+                       num(self.q.get("lon")), num(self.q.get("acc")), quando_valido(self.q.get("quando")),
                        u["nome"]))
             lista = [x for x in json.loads(v["puladas"] or "[]") if x != etapa]
             c.execute("UPDATE veiculos SET puladas=?, sem_avarias=CASE WHEN ?='avarias' THEN 0 ELSE sem_avarias END, "

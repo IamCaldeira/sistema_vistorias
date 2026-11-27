@@ -8,6 +8,7 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/web/icon-192.png">
 <title>Vistoria da Frota</title>
+<link rel="stylesheet" href="/web/fa/css/all.min.css">
 <link rel="stylesheet" href="/web/estilo.css">
 </head>
 <body class="cel">
@@ -246,6 +247,9 @@ function recalc(x) {
   if (x.puladas_lista.length) a.push('puladas');
   if (x.fotos.some(f => f.etapa === 'avarias')) a.push('avarias');
   if (x.placa_legivel === 'Não') a.push('placa_ilegivel');
+  if (x.parabrisa_quebrado === 'Sim') a.push('parabrisa_quebrado');
+  if (x.farois_funcionando === 'Não') a.push('farois_defeito');
+  if (x.categoria === 'Máquina' && x.placa_patrimonial === 'Não') a.push('sem_placa_patr');
   if (o && x.situacao !== 'Não localizado' && !o.na && !cfg.itens.every(i => o[i.id])) a.push('itens_faltando');
   x.alertas = a;
 }
@@ -268,7 +272,9 @@ async function removerOps(L, ops) {
 async function opIniciar(d) {
   await atual(); const eraPendente = v.status === 'pendente';
   Object.assign(v, {situacao: d.situacao, odometro: d.odometro, local_visto: d.local_visto, uso_local: d.uso_local,
-                    motorista: d.motorista, plotado: d.plotado, placa_legivel: d.placa_legivel, obs: d.obs, itens_obj: d.itens});
+                    motorista: d.motorista, plotado: d.plotado, placa_legivel: d.placa_legivel, parabrisa_quebrado: d.parabrisa_quebrado,
+                    farois_funcionando: d.farois_funcionando, farois_problema: d.farois_problema,
+                    categoria: d.categoria, placa_patrimonial: d.placa_patrimonial, obs: d.obs, itens_obj: d.itens});
   Object.entries(d.cadastro || {}).forEach(([k, val]) => v[k] = val);
   v.chave = calcChave(v.placa, v.patrimonio) || v.chave;
   if (v.status !== 'concluido') v.status = 'em_andamento';
@@ -333,7 +339,7 @@ async function opReiniciar() {
   await atual();
   await mutar(v, async L => {
     await removerOps(L, await opsPendentes(L, v.id, () => true));
-    Object.assign(v, {status: 'pendente', situacao: '', odometro: '', local_visto: '', uso_local: '', motorista: '', plotado: '', placa_legivel: '', obs: '',
+    Object.assign(v, {status: 'pendente', situacao: '', odometro: '', local_visto: '', uso_local: '', motorista: '', plotado: '', placa_legivel: '', parabrisa_quebrado: '', farois_funcionando: '', farois_problema: '', categoria: '', placa_patrimonial: '', obs: '',
       itens_obj: null, fotos: [], puladas_lista: [], sem_avarias: 0, vistoriador_nome: null, vistoriador_matricula: null,
       inicio: null, fim: null, lat: null, lon: null, acc: null});
     await enf(L, v, {tipo: 'reiniciar'});
@@ -386,13 +392,13 @@ async function carregarLista(nFila) {
       <a class="item" data-id="${x.id}"><div class="l1"><b>${esc(x.chave)}</b>${badge(x.status)}</div>
       <div>${esc(x.marca_modelo) || '<i>sem descrição</i>'}</div>
       <small>${esc(x.secretaria)}${x.local_cadastro ? ' · ' + esc(x.local_cadastro) : ''}</small> ${icones(x.alertas)}</a>`).join('')
-    + (ok.length > 60 ? `<div class="dica">Mostrando 60 de ${ok.length}. Use a busca.</div>` : '')
-    : `<div class="dica">${todos.length ? 'Nenhum veículo encontrado.' : 'Nenhum veículo salvo no celular ainda. Conecte-se ao notebook para baixar a lista.'}</div>`;
+    + (ok.length > 60 ? `<div class="dica" style="text-align:center">Mostrando 60 de ${ok.length}. Use a busca.</div>` : '')
+    : `<div class="dica" style="text-align:center;padding:24px">${todos.length ? 'Nenhum veículo encontrado.' : 'Nenhum veículo salvo no celular ainda. Conecte-se ao notebook para baixar a lista.'}</div>`;
   $$('#lista .item').forEach(a => a.onclick = () => telaVeiculo(+a.dataset.id));
   const r = $('#rodape'); if (r) {
     r.innerHTML = `${todos.length} veículo(s) no celular${ultimaSync ? ' · atualizado às ' + new Date(ultimaSync).toTimeString().slice(0, 5) : ''}<br>
       <button id="atualizar">Atualizar agora</button> · <button id="trocaSenha">Alterar minha senha</button>
-      · <a href="/">Abrir painel</a>`;
+      · <a href="/" style="color:var(--azul2)">Abrir painel</a>`;
     $('#atualizar').onclick = async () => { if (!(await ping())) { alert('Sem conexão com o notebook.'); atualizaEstado(); return; } await sincronizar(true); telaLista(); };
     $('#trocaSenha').onclick = abrirAlterarSenha;
   }
@@ -415,26 +421,36 @@ async function telaVeiculo(id) {
   const io = v.itens_obj || {};
   let topo = '';
   if (v.status === 'concluido')
-    topo = `<div class="aviso"><i class="fa-solid fa-circle-check"></i>
+    topo = `<div class="aviso" style="background:#d9f2dc;border-color:#9ccc9f;color:#1f6b27"><i class="fa-solid fa-circle-check"></i>
       Vistoria concluída por <b>${esc(v.vistoriador_nome)}</b> em ${fmtData(v.fim)}.
-      ${v.pdf ? `<br><a href="/relatorios/${v.chave}_relatorio.pdf" target="_blank">Abrir relatório PDF</a>` : ''}</div>
+      ${v.pdf ? `<br><a href="/relatorios/${v.chave}_relatorio.pdf" target="_blank" style="color:#1f6b27">Abrir relatório PDF</a>` : ''}</div>
       <button class="btn cinza" id="verRev"><i class="fa-solid fa-images"></i> Ver revisão das fotos</button>
       <button class="btn verm" id="refazer"><i class="fa-solid fa-rotate-left"></i> Refazer vistoria inteira</button>`;
   else if (v.status === 'em_andamento')
     topo = `<div class="aviso"><i class="fa-solid fa-spinner"></i> Vistoria em andamento (${v.etapas_feitas}/${v.etapas_total} etapas).</div>`;
 
   app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
-    <div class="etapa-titulo">${esc(v.chave)}</div>
+    <div class="etapa-titulo" style="margin-bottom:0">${esc(v.chave)}</div>
     <div class="dica">${esc(v.marca_modelo)}</div>${topo}
     <div class="dados">${linha('Patrimônio', v.patrimonio)}${linha('Tipo', v.tipo)}${linha('Ano', v.ano)}
       ${linha('Chassi', v.chassi)}${linha('Renavam', v.renavam)}
       ${linha('Secretaria', v.secretaria)}${linha('Local cadastrado', v.local_cadastro)}${linha('Responsável', v.responsavel)}</div>
     ${v.status !== 'concluido' ? `
     <label>Situação aparente *</label><select id="f-situacao">${sit}</select>
+    <label>Categoria</label>
+    <select id="f-categoria">${['', 'Veículo', 'Máquina'].map(s => `<option ${s === (v.categoria || '') ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <div id="f-patr-box" style="display:none"><label>Existe placa patrimonial colada?</label>
+      <select id="f-patr">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.placa_patrimonial || '') ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
     <label>Veículo plotado (adesivado com identificação da Prefeitura)?</label>
     <select id="f-plotado">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.plotado || '') ? 'selected' : ''}>${s}</option>`).join('')}</select>
     <label>Placa legível?</label>
     <select id="f-placaleg">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.placa_legivel || '') ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <label>Para-brisa quebrado?</label>
+    <select id="f-parabrisa">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.parabrisa_quebrado || '') ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <label>Faróis e lanternas estão funcionando?</label>
+    <select id="f-farois">${['', 'Sim', 'Não'].map(s => `<option ${s === (v.farois_funcionando || '') ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <div id="f-farois-box" style="display:none"><label>Qual o problema nos faróis/lanternas? *</label>
+      <input type="text" id="f-farois-prob" placeholder="ex.: lanterna traseira esquerda queimada" value="${esc(v.farois_problema)}"></div>
     <label>Odômetro / Horímetro</label><input type="text" id="f-odometro" inputmode="numeric" value="${esc(v.odometro)}">
     <label>Local onde está agora</label><input type="text" id="f-local" value="${esc(v.local_visto || v.local_cadastro)}">
     <label>Onde o veículo é utilizado</label><input type="text" id="f-uso" placeholder="ex.: transporte de pacientes, Secretaria de Saúde" value="${esc(v.uso_local)}">
@@ -458,13 +474,26 @@ async function telaVeiculo(id) {
     const sync = () => $$('[data-item]').forEach(cb => { cb.disabled = $('#item-na').checked; if ($('#item-na').checked) cb.checked = false; });
     $('#item-na').onchange = sync; sync();
   }
+  if ($('#f-categoria')) {
+    const togC = () => { $('#f-patr-box').style.display = $('#f-categoria').value === 'Máquina' ? 'block' : 'none'; };
+    $('#f-categoria').onchange = togC; togC();
+  }
+  if ($('#f-farois')) {
+    const togF = () => { $('#f-farois-box').style.display = $('#f-farois').value === 'Não' ? 'block' : 'none'; };
+    $('#f-farois').onchange = togF; togF();
+  }
   if ($('#iniciar')) $('#iniciar').onclick = async () => {
     const cadastro = {}; $$('[data-cad]').forEach(el => cadastro[el.dataset.cad] = el.value.trim());
     const itens = {na: $('#item-na').checked}; $$('[data-item]').forEach(cb => itens[cb.dataset.item] = cb.checked);
     const dados = {situacao: $('#f-situacao').value, odometro: $('#f-odometro').value, local_visto: $('#f-local').value,
                    uso_local: $('#f-uso').value, motorista: $('#f-motorista').value, plotado: $('#f-plotado').value, placa_legivel: $('#f-placaleg').value,
+                   parabrisa_quebrado: $('#f-parabrisa').value, farois_funcionando: $('#f-farois').value,
+                   categoria: $('#f-categoria').value,
+                   placa_patrimonial: $('#f-categoria').value === 'Máquina' ? $('#f-patr').value : '',
+                   farois_problema: $('#f-farois').value === 'Não' ? $('#f-farois-prob').value.trim() : '',
                    obs: $('#f-obs').value, itens, cadastro};
     if (!dados.situacao) { $('#msg').textContent = 'Escolha a situação aparente.'; return; }
+    if (dados.farois_funcionando === 'Não' && !dados.farois_problema) { $('#msg').textContent = 'Descreva o problema dos faróis/lanternas.'; return; }
     try { await opIniciar(dados); if (v.situacao === 'Não localizado') telaRevisao(); else proxima(); }
     catch (e) { $('#msg').textContent = e.message; }
   };
@@ -496,7 +525,7 @@ async function telaFoto(idx) {
               <button class="btn cinza" id="pular"><i class="fa-solid fa-forward"></i> Não se aplica / pular</button>`;
   }
   app.innerHTML = `<button class="btn sec peq" id="sairVist"><i class="fa-solid fa-arrow-left"></i> Pausar vistoria</button>
-    <div class="progresso"><div></div></div>
+    <div class="progresso"><div style="width:${idx / n * 100}%"></div></div>
     <small>${esc(v.chave)} · Etapa ${idx + 1} de ${n}</small>
     <div class="etapa-titulo">${esc(e.titulo)}</div><div class="dica">${esc(e.dica)}</div>
     <input type="file" id="arq" accept="image/*" capture="environment" hidden>
@@ -554,16 +583,20 @@ async function telaRevisao() {
       <button class="btn sec peq" data-ir="${i}">${e.status === 'pendente' ? 'Fazer' : 'Refazer'}</button></div>${miniaturas(fotos, false)}</div>`;
   }).join('');
   const o = v.itens_obj;
-  const itensTxt = !o ? '—' : o.na ? 'Não se aplica' : cfg.itens.map(i => `${i.titulo}: ${o[i.id] ? 'sim' : '<b>não</b>'}`).join(' · ');
+  const itensTxt = !o ? '—' : o.na ? 'Não se aplica' : cfg.itens.map(i => `${i.titulo}: ${o[i.id] ? 'sim' : '<b style="color:#c62828">não</b>'}`).join(' · ');
   app.innerHTML = `<button class="btn sec peq" id="voltar"><i class="fa-solid fa-arrow-left"></i> Lista</button>
     <div class="etapa-titulo">Revisão · ${esc(v.chave)}</div>
     <div class="dados"><div><span>Situação</span><b>${esc(v.situacao)}</b></div>
       <div><span>Plotado</span><b>${esc(v.plotado) || '—'}</b></div>
       <div><span>Placa legível</span><b>${esc(v.placa_legivel) || '—'}</b></div>
+      <div><span>Para-brisa quebrado</span><b>${esc(v.parabrisa_quebrado) || '—'}</b></div>
+      <div><span>Categoria</span><b>${esc(v.categoria) || '—'}</b></div>
+      ${v.categoria === 'Máquina' ? `<div><span>Placa patrimonial colada</span><b>${esc(v.placa_patrimonial) || '—'}</b></div>` : ''}
+      <div><span>Faróis/lanternas</span><b>${v.farois_funcionando === 'Não' ? 'Com defeito: ' + esc(v.farois_problema) : (esc(v.farois_funcionando) || '—')}</b></div>
       <div><span>Odômetro/Horímetro</span><b>${esc(v.odometro) || '—'}</b></div>
       ${v.uso_local ? `<div><span>Utilizado em</span><b>${esc(v.uso_local)}</b></div>` : ''}
       ${v.motorista ? `<div><span>Motorista</span><b>${esc(v.motorista)}</b></div>` : ''}
-      <div><span>Itens</span><b>${itensTxt}</b></div>
+      <div><span>Itens</span><b style="font-size:12.5px">${itensTxt}</b></div>
       <div><span>GPS</span><b>${v.lat != null ? '±' + Math.round(v.acc ?? 0) + ' m' : 'não registrado'}</b></div></div>
     ${naoLoc ? '<div class="aviso">Veículo marcado como <b>não localizado</b>. Não é necessário tirar fotos.</div>' : linhas}
     <div id="msg" class="erro"></div>
@@ -588,7 +621,7 @@ async function telaFim(res) {
   else bloco = `<div class="aviso"><i class="fa-solid fa-cloud-arrow-up"></i> Vistoria <b>salva no celular</b>. Ela será enviada ao notebook (e o relatório PDF gerado) assim que houver conexão.
     ${pend ? `<br>Envios pendentes: <b>${pend}</b>.` : ''}</div>`;
   app.innerHTML = `<div class="grande"><i class="fa-solid fa-circle-check"></i><br>Vistoria concluída!</div>
-    <div class="dica">${esc(v.chave)}</div>${bloco}
+    <div class="dica" style="text-align:center">${esc(v.chave)}</div>${bloco}
     <button class="btn verde" id="prox"><i class="fa-solid fa-arrow-right"></i> Próximo veículo</button>`;
   $('#prox').onclick = telaLista;
 }

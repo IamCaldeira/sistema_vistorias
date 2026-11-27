@@ -13,8 +13,9 @@ echo [2/3] Instalando bibliotecas opcionais (podem falhar sem problema)...
 python -m pip install openpyxl
 python -m pip install pillow-heif
 echo.
-echo [3/3] Criando o certificado do GPS...
+echo [3/3] Baixando icones (Font Awesome) e criando certificado do GPS...
 python servidor.py --preparar
 echo.
-echo Pronto! Para usar, abra o arquivo iniciar.bat
+echo Pronto! Depois disso o sistema funciona SEM internet.
+echo Para usar, abra o arquivo iniciar.bat
 pause

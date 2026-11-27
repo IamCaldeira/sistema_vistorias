@@ -3,7 +3,7 @@ Levantamento da Frota Municipal - Prefeitura de Caratinga
 Servidor local (painel no PC + vistoria no celular).
 
 Uso:        python servidor.py
-Preparação: python servidor.py --preparar   (cria o certificado)
+Preparação: python servidor.py --preparar   (baixa os ícones e cria o certificado)
 """
 import csv
 import hashlib
@@ -66,6 +66,10 @@ PORTA_HTTP = 8000
 PORTA_HTTPS = 8443
 LIMITE_UPLOAD = 60 * 1024 * 1024
 
+FA_VERSAO = "6.5.1"
+FA_BASE = f"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/{FA_VERSAO}"
+FA_ARQUIVOS = ["css/all.min.css", "webfonts/fa-solid-900.woff2",
+               "webfonts/fa-regular-400.woff2", "webfonts/fa-brands-400.woff2"]
 
 # ------------------------------------------------------------- definições ----
 ETAPAS = [
@@ -93,7 +97,9 @@ TIPOS = ["Automóvel", "Caminhonete / Utilitário", "Van / Micro-ônibus", "Ôni
          "Implemento / Reboque", "Outro"]
 CAD = ["patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi", "renavam",
        "secretaria", "local_cadastro", "responsavel", "situacao_cadastro"]
-VIST = ["situacao", "odometro", "local_visto", "uso_local", "motorista", "plotado", "placa_legivel", "obs"]
+VIST = ["situacao", "odometro", "local_visto", "uso_local", "motorista", "plotado", "placa_legivel",
+        "parabrisa_quebrado", "farois_funcionando", "farois_problema",
+        "categoria", "placa_patrimonial", "obs"]
 ITENS = [("estepe", "Estepe"), ("triangulo", "Triângulo"), ("macaco", "Macaco"),
          ("chave_roda", "Chave de roda")]
 PERFIS = ("admin", "vistoriador")
@@ -133,6 +139,8 @@ ROTULO_FLAGS = {
     "sem_gps": "Sem GPS", "gps_impreciso": "GPS impreciso",
     "puladas": "Fotos puladas", "avarias": "Com avarias",
     "itens_faltando": "Itens de segurança ausentes", "placa_ilegivel": "Placa ilegível",
+    "parabrisa_quebrado": "Para-brisa quebrado", "farois_defeito": "Faróis/lanternas com defeito",
+    "sem_placa_patr": "Máquina sem placa patrimonial",
 }
 
 # ---------------------------------------------------------------- utilidades --
@@ -176,15 +184,28 @@ def num(v):
         return None
 
 
+_local = threading.local()
+
+
 @contextmanager
 def conexao():
     c = sqlite3.connect(DB_PATH, timeout=20)
     c.row_factory = sqlite3.Row
+    anterior = getattr(_local, "c", None)
+    _local.c = c
     try:
         yield c
         c.commit()
     finally:
+        _local.c = anterior
         c.close()
+
+
+def confirmar_gravacao():
+    """Grava no banco ANTES de responder ao cliente (evita ler o estado antigo logo em seguida)."""
+    c = getattr(_local, "c", None)
+    if c is not None:
+        c.commit()
 
 
 class RotaErro(Exception):
@@ -249,7 +270,11 @@ def iniciar_banco():
                     c.execute(f"ALTER TABLE {tabela} ADD COLUMN {nome} {tipo}")
         garantir("veiculos", [("uso_local", "TEXT"), ("motorista", "TEXT"),
                               ("plotado", "TEXT"), ("itens", "TEXT"),
-                              ("placa_legivel", "TEXT")])
+                              ("placa_legivel", "TEXT"), ("parabrisa_quebrado", "TEXT"),
+                              ("farois_funcionando", "TEXT"), ("farois_problema", "TEXT"),
+                              ("categoria", "TEXT"), ("placa_patrimonial", "TEXT")])
+        # correção: a pergunta da placa patrimonial vale só para máquinas; limpa respostas antigas de veículos
+        c.execute("UPDATE veiculos SET placa_patrimonial='' WHERE categoria='Veículo' AND placa_patrimonial<>''")
         garantir("usuarios", [("senha_hash", "TEXT"), ("salt", "TEXT"),
                               ("perfil", "TEXT DEFAULT 'vistoriador'"), ("ativo", "INTEGER DEFAULT 1"),
                               ("matricula_chave", "TEXT")])
@@ -380,6 +405,25 @@ def preparar_certificado():
         return None
 
 
+def garantir_fontawesome():
+    """Baixa o Font Awesome Free uma única vez (precisa de internet nessa hora)."""
+    destino = WEB / "fa"
+    if all((destino / a).exists() for a in FA_ARQUIVOS):
+        return True
+    import urllib.request
+    try:
+        for a in FA_ARQUIVOS:
+            alvo = destino / a
+            alvo.parent.mkdir(parents=True, exist_ok=True)
+            with urllib.request.urlopen(f"{FA_BASE}/{a}", timeout=15) as r:
+                alvo.write_bytes(r.read())
+        return True
+    except Exception as e:
+        print(f"  [!] Não foi possível baixar os ícones (Font Awesome): {e}")
+        print("      Conecte o notebook à internet e rode:  python servidor.py --preparar")
+        return False
+
+
 # ------------------------------------------------------------- regras de dados --
 def fotos_do_veiculo(c, vid):
     return [dict(f) for f in c.execute(
@@ -431,6 +475,12 @@ def calcular_flags(v, n_avarias):
         f.append("avarias")
     if v["placa_legivel"] == "Não":
         f.append("placa_ilegivel")
+    if v["parabrisa_quebrado"] == "Sim":
+        f.append("parabrisa_quebrado")
+    if v["farois_funcionando"] == "Não":
+        f.append("farois_defeito")
+    if v["categoria"] == "Máquina" and v["placa_patrimonial"] == "Não":
+        f.append("sem_placa_patr")
     if v["itens"] and v["situacao"] != "Não localizado":
         o = json.loads(v["itens"])
         if not o.get("na") and not all(o.get(k) for k, _ in ITENS):
@@ -562,6 +612,11 @@ def resumo_geral(c):
     r["puladas"] = sum(1 for v in vs if "puladas" in v["alertas"])
     r["itens"] = sum(1 for v in vs if "itens_faltando" in v["alertas"])
     r["placa_ilegivel"] = sum(1 for v in vs if "placa_ilegivel" in v["alertas"])
+    r["parabrisa"] = sum(1 for v in vs if "parabrisa_quebrado" in v["alertas"])
+    r["farois"] = sum(1 for v in vs if "farois_defeito" in v["alertas"])
+    r["sem_placa_patr"] = sum(1 for v in vs if "sem_placa_patr" in v["alertas"])
+    r["veiculos"] = sum(1 for v in vs if v["categoria"] == "Veículo")
+    r["maquinas"] = sum(1 for v in vs if v["categoria"] == "Máquina")
     r["gps"] = sum(1 for v in vs if "sem_gps" in v["alertas"] or "gps_impreciso" in v["alertas"])
     sec = {}
     for v in vs:
@@ -736,7 +791,12 @@ def codigo_relatorio(numero, tipo, ref, quando):
 
 
 def pagina_verificacao(n, cod):
-    estilo = ""
+    estilo = ("body{font-family:Segoe UI,Arial,sans-serif;background:#eef1f4;margin:0}"
+              ".c{max-width:560px;margin:24px auto;background:#fff;border-radius:14px;padding:24px;text-align:center}"
+              "img{width:80px}h1{font-size:19px;color:#0b3d6b;margin:6px 0}"
+              ".ok{color:#2e7d32;font-size:22px;font-weight:700}.no{color:#c62828;font-size:22px;font-weight:700}"
+              "td{padding:5px 8px;text-align:left;border-top:1px solid #e5e9ee}td:first-child{color:#5f6b76}"
+              "input{padding:9px;font-size:16px;margin:4px;width:70%}button{padding:10px 18px;font-size:16px}")
     corpo = ('<img src="/web/brasao.png" alt=""><h1>Prefeitura Municipal de Caratinga</h1>'
              '<div>Departamento de Patrimônio · Verificação de relatório</div><hr>')
     if n:
@@ -754,7 +814,7 @@ def pagina_verificacao(n, cod):
                        "mais recente ou alterado).")
             elif r["arquivo"]:
                 arq = "O arquivo PDF não está mais na pasta de relatórios."
-            corpo += ('<div class="ok">✔ Relatório autêntico</div><table>'
+            corpo += ('<div class="ok">✔ Relatório autêntico</div><table style="width:100%;margin-top:12px">'
                       f'<tr><td>Número de controle</td><td><b>{esc_html(r["numero"])}</b></td></tr>'
                       f'<tr><td>Tipo</td><td>{esc_html(r["tipo"])}</td></tr>'
                       f'<tr><td>Referência</td><td>{esc_html(r["referencia"] or "")}</td></tr>'
@@ -785,6 +845,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- respostas
     def enviar(self, corpo, tipo, codigo=200, extra=None):
+        confirmar_gravacao()
         self.send_response(codigo)
         self.send_header("Content-Type", tipo)
         self.send_header("Content-Length", str(len(corpo)))
@@ -1014,7 +1075,8 @@ class Handler(BaseHTTPRequestHandler):
         cab = ["identificacao", "patrimonio", "placa", "tipo", "marca_modelo", "ano", "chassi",
                "renavam", "secretaria", "local_cadastro", "responsavel", "situacao_cadastro",
                "status", "situacao_aparente", "odometro_horimetro", "local_verificado",
-               "onde_utilizado", "motorista", "plotado", "placa_legivel", "estepe", "triangulo", "macaco",
+               "onde_utilizado", "motorista", "plotado", "placa_legivel", "parabrisa_quebrado", "farois_funcionando", "problema_farois", "categoria",
+               "placa_patrimonial_colada", "estepe", "triangulo", "macaco",
                "chave_de_roda", "observacoes", "vistoriador", "matricula", "inicio", "fim",
                "latitude", "longitude", "precisao_m", "n_fotos", "etapas_puladas", "alertas", "origem"]
 
@@ -1030,7 +1092,8 @@ class Handler(BaseHTTPRequestHandler):
                            v["ano"], v["chassi"], v["renavam"], v["secretaria"], v["local_cadastro"],
                            v["responsavel"], v["situacao_cadastro"], v["status"], v["situacao"],
                            v["odometro"], v["local_visto"], v["uso_local"], v["motorista"],
-                           v["plotado"], v["placa_legivel"], sn(v, "estepe"), sn(v, "triangulo"), sn(v, "macaco"),
+                           v["plotado"], v["placa_legivel"], v["parabrisa_quebrado"], v["farois_funcionando"], v["farois_problema"],
+                           v["categoria"], v["placa_patrimonial"], sn(v, "estepe"), sn(v, "triangulo"), sn(v, "macaco"),
                            sn(v, "chave_roda"), v["obs"], v["vistoriador_nome"],
                            v["vistoriador_matricula"], v["inicio"], v["fim"], dec(v["lat"]),
                            dec(v["lon"]), dec(v["acc"]), v["n_fotos"], ",".join(v["puladas_lista"]),
@@ -1264,6 +1327,7 @@ class Handler(BaseHTTPRequestHandler):
             if acao == "salvar":
                 gravar_cadastro(c, v, d)
                 sets = {k: txt(d[k]) for k in VIST if k in d}
+                self.validar_farois(sets, v)
                 if "itens" in d:
                     sets["itens"] = limpar_itens(d["itens"])
                 if sets:
@@ -1276,6 +1340,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not txt(d.get("situacao")):
                     raise RotaErro("Informe a situação aparente do veículo.")
                 sets = {k: txt(d.get(k)) for k in VIST}
+                self.validar_farois(sets, v)
                 if isinstance(d.get("itens"), dict):
                     sets["itens"] = limpar_itens(d["itens"])
                 sets["status"] = "em_andamento" if v["status"] != "concluido" else v["status"]
@@ -1333,7 +1398,7 @@ class Handler(BaseHTTPRequestHandler):
                     apagar_arquivo_foto(v["chave"], f["arquivo"])
                 c.execute("DELETE FROM fotos WHERE veiculo_id=?", (vid,))
                 c.execute("UPDATE veiculos SET status='pendente', situacao=NULL, odometro=NULL, local_visto=NULL, "
-                          "uso_local=NULL, motorista=NULL, plotado=NULL, placa_legivel=NULL, itens=NULL, obs=NULL, "
+                          "uso_local=NULL, motorista=NULL, plotado=NULL, placa_legivel=NULL, parabrisa_quebrado=NULL, farois_funcionando=NULL, farois_problema=NULL, categoria=NULL, placa_patrimonial=NULL, itens=NULL, obs=NULL, "
                           "vistoriador_nome=NULL, vistoriador_matricula=NULL, inicio=NULL, fim=NULL, "
                           "lat=NULL, lon=NULL, acc=NULL, puladas='[]', sem_avarias=0 WHERE id=?", (vid,))
                 pdf_path(v["chave"]).unlink(missing_ok=True)
@@ -1347,6 +1412,19 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 raise RotaErro("Ação inválida.", 404)
             return self.json({"ok": True, "veiculo": veiculo_dict(c, achar(c, vid), True)})
+
+    @staticmethod
+    def validar_farois(sets, v):
+        """Faróis/lanternas com defeito exigem a descrição do problema; senão, limpa o texto."""
+        f = sets.get("farois_funcionando", v["farois_funcionando"])
+        prob = sets.get("farois_problema", v["farois_problema"])
+        if f == "Não" and not txt(prob):
+            raise RotaErro("Descreva o problema dos faróis/lanternas.")
+        if f != "Não":
+            sets["farois_problema"] = ""
+        # a pergunta da placa patrimonial só existe para máquinas (não para veículos)
+        if sets.get("categoria", v["categoria"]) != "Máquina":
+            sets["placa_patrimonial"] = ""
 
     def salvar_foto(self, u):
         vid, etapa = int(self.q.get("id") or 0), self.q.get("etapa", "")
@@ -1412,9 +1490,10 @@ def principal():
     print("=" * 62)
     print("  LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA")
     print("=" * 62)
+    fa_ok = garantir_fontawesome()
     cert = preparar_certificado()
     if preparar:
-        print("Preparação concluída." if cert else "Preparação concluída com avisos (veja acima).")
+        print("Preparação concluída." if fa_ok and cert else "Preparação concluída com avisos (veja acima).")
         return
     if relatorio is None:
         print(f"  [!] PDF desativado: {ERRO_RELATORIO}\n      Rode instalar.bat (precisa de internet).")

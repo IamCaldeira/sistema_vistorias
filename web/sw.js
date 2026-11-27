@@ -1,7 +1,7 @@
 /* Service worker: guarda o aplicativo no celular para abrir mesmo sem conexão com o notebook.
    Só funciona em HTTPS confiável (certificado instalado). Dados e fotos NÃO passam por aqui:
    são guardados pelo próprio aplicativo (IndexedDB) e enviados quando a conexão volta. */
-const CACHE = 'frota-v3-etapa1';
+const CACHE = 'frota-v3';
 const CASCA = ['/m', '/manifest.webmanifest', '/web/estilo.css', '/web/comum.js', '/web/brasao.png',
   '/web/icon-192.png', '/web/icon-512.png', '/web/fa/css/all.min.css',
   '/web/fa/webfonts/fa-solid-900.woff2', '/web/fa/webfonts/fa-regular-400.woff2', '/web/fa/webfonts/fa-brands-400.woff2'];

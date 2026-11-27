@@ -1,0 +1,57 @@
+LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA
+==========================================================
+
+1) INSTALAÇÃO (uma única vez, com o notebook COM INTERNET)
+   - Dois cliques em  instalar.bat
+   - Instala as bibliotecas (PDF, QR Code, certificado), baixa os ícones
+     (Font Awesome) e cria o certificado local.
+   - Depois disso o sistema funciona SEM internet (só o fundo do mapa precisa dela).
+
+2) USO DIÁRIO
+   - Ligue o Hotspot móvel do Windows, conecte o celular e dê dois cliques em iniciar.bat
+   - O painel abre sozinho (http://localhost:8000).
+   - PRIMEIRO USO: crie o usuário ADMINISTRADOR (nome, matrícula, senha).
+   - Em "Usuários" o administrador cria os vistoriadores (matrícula + senha inicial).
+     Cada um pode trocar a própria senha em "Alterar senha".
+
+3) CELULAR NOVO (uma vez por aparelho)  - tira o aviso de "conexão não segura",
+   libera o GPS e o modo OFFLINE
+   - No painel, toque em "Celular novo? Instalar certificado" e leia o QR Code
+     (ou abra  http://IP-DO-NOTEBOOK:8000/certificado  no celular).
+   - Baixe e instale o certificado (passo a passo na própria página: Android e iPhone).
+   - Depois abra o QR Code principal do painel. Entre COM CONEXÃO uma vez, para o
+     celular baixar a lista de veículos. Opcional: "Adicionar à tela inicial".
+   - Se o IP do notebook mudar, NÃO precisa instalar nada de novo.
+
+4) MODO OFFLINE (celular)
+   - Longe do alcance do hotspot, a vistoria continua normalmente: fotos, dados e GPS
+     ficam salvos no celular. No topo aparece "Sem conexão · N envios pendentes".
+   - Ao voltar ao alcance do notebook, tudo é enviado sozinho e o relatório PDF é gerado.
+   - Não limpe os dados do navegador enquanto houver envios pendentes.
+   - Os horários registrados são os da hora em que a foto/vistoria foi feita.
+
+5) PERFIS
+   - Administrador: tudo (importar, editar, excluir, zerar banco, usuários).
+   - Vistoriador: vistoria no celular, consulta no painel e geração de relatórios.
+   - 5 senhas erradas seguidas bloqueiam a matrícula por 5 minutos.
+
+6) RELATÓRIOS (botão "Relatórios" no painel)
+   - Geral da frota, por secretaria, e Pendências (todas ou por secretaria, com campo de
+     ciência do chefe do setor). O relatório de cada veículo é gerado ao concluir a vistoria.
+   - Todo PDF tem NÚMERO DE CONTROLE e CÓDIGO DE AUTENTICIDADE no rodapé, e um QR Code.
+     A verificação é no próprio painel (Relatórios > Verificar) ou pelo QR, na rede do notebook.
+
+7) ONDE FICAM OS ARQUIVOS (pasta "dados")
+   dados\fotos\PLACA\        fotos de cada veículo
+   dados\relatorios\         relatórios em PDF (pasta separada das fotos)
+   dados\frota.db            banco de dados (inclui usuários e números de controle)
+   dados\certificado\        certificados (NÃO compartilhe ca-chave.pem nem chave.pem)
+   dados\backups\            cópias feitas pelo botão "Zerar banco"
+   dados\excluidos\          fotos de veículos excluídos
+   FAÇA BACKUP COPIANDO A PASTA "dados" TODOS OS DIAS.
+
+8) PERSONALIZAR O CABEÇALHO DO PDF
+   Edite a lista CABECALHO no início de relatorio.py. O brasão é web\brasao.png.
+
+ATUALIZANDO uma versão antiga: extraia o ZIP novo sobre a pasta antiga e NÃO apague "dados".
+O banco é atualizado sozinho. Ao abrir, o sistema pede para criar o administrador.

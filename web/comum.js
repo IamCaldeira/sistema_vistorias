@@ -10,6 +10,9 @@ const ALERTAS = {
   gps_impreciso: ['fa-location-dot', 'GPS impreciso'],
   puladas: ['fa-forward', 'Fotos puladas'],
   avarias: ['fa-car-burst', 'Com avarias registradas'],
+  sem_placa_patr: ['fa-tag', 'Máquina sem placa patrimonial colada'],
+  parabrisa_quebrado: ['fa-window-maximize', 'Para-brisa quebrado'],
+  farois_defeito: ['fa-lightbulb', 'Faróis/lanternas com defeito'],
   placa_ilegivel: ['fa-eye-slash', 'Placa ilegível'],
   itens_faltando: ['fa-screwdriver-wrench', 'Item de segurança ausente (estepe, triângulo, macaco ou chave de roda)'],
 };
@@ -40,7 +43,7 @@ function iniciarSessao(aoEntrar) {
         <label>Senha</label><input type="password" id="lg-senha" autocomplete="current-password">
         <div class="erro" id="lg-erro"></div>
         <button class="btn" type="submit"><i class="fa-solid fa-right-to-bracket"></i> Entrar</button></form>
-      <form id="lg-setup" style="display:none"><div class="aviso">Primeiro uso do sistema: cadastre o
+      <form id="lg-setup" style="display:none"><div class="aviso" style="text-align:left">Primeiro uso do sistema: cadastre o
         <b>administrador</b>. Ele cria os demais usuários depois.</div>
         <label>Nome completo</label><input type="text" id="st-nome" autocomplete="name">
         <label>Matrícula</label><input type="text" id="st-mat" autocomplete="username">

@@ -3,8 +3,11 @@ LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA
 
 1) INSTALAÇÃO (uma única vez, com o notebook COM INTERNET)
    - Dois cliques em  instalar.bat
-   - Instala as bibliotecas (PDF, QR Code, certificado), baixa os ícones
-     (Font Awesome) e cria o certificado local.
+   - Precisa do Python 3 instalado (marque "Add Python to PATH").
+   - Instala as bibliotecas (PDF, QR Code, certificado, Excel e fotos HEIC), baixa os
+     ícones (Font Awesome) e cria o certificado local.
+   - Se o download dos ícones falhar, conecte à internet e rode:
+     python servidor.py --preparar
    - Depois disso o sistema funciona SEM internet (só o fundo do mapa precisa dela).
 
 2) USO DIÁRIO
@@ -30,6 +33,15 @@ LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA
    - Não limpe os dados do navegador enquanto houver envios pendentes.
    - Os horários registrados são os da hora em que a foto/vistoria foi feita.
 
+   O QUE PREENCHER NA VISTORIA
+   - Situação aparente (obrigatória). "Não localizado" dispensa as fotos.
+   - Categoria: Veículo ou Máquina. Em máquinas, informe se há placa patrimonial colada.
+   - Plotagem, placa legível, para-brisa quebrado, faróis/lanternas (com defeito,
+     a descrição do problema é obrigatória).
+   - Odômetro/horímetro, local, onde é utilizado, motorista, itens de segurança
+     (estepe, triângulo, macaco, chave de roda) e observações.
+   - Depois, siga o roteiro de fotos, revise e conclua.
+
 5) PERFIS
    - Administrador: tudo (importar, editar, excluir, zerar banco, usuários).
    - Vistoriador: vistoria no celular, consulta no painel e geração de relatórios.
@@ -46,8 +58,8 @@ LEVANTAMENTO DA FROTA MUNICIPAL - PREFEITURA DE CARATINGA
    dados\relatorios\         relatórios em PDF (pasta separada das fotos)
    dados\frota.db            banco de dados (inclui usuários e números de controle)
    dados\certificado\        certificados (NÃO compartilhe ca-chave.pem nem chave.pem)
-   dados\backups\            cópias feitas pelo botão "Zerar banco"
-   dados\excluidos\          fotos de veículos excluídos
+   dados\backups\            cópias do banco feitas pelo botão "Zerar banco"
+   dados\excluidos\          fotos excluídas (e fotos/PDFs guardados ao zerar o banco)
    FAÇA BACKUP COPIANDO A PASTA "dados" TODOS OS DIAS.
 
 8) PERSONALIZAR O CABEÇALHO DO PDF

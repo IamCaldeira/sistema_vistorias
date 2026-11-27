@@ -10,7 +10,7 @@ A vistoria visual da frota envolve muitos veículos, muitas fotos e muita confer
 - **Padronização:** todos os veículos são fotografados nos mesmos ângulos (frente, traseira, laterais, placa, chassi, painel, interior, pneus, avarias e motor) e respondem às mesmas perguntas.
 - **Organização:** um único banco de dados reúne o cadastro do patrimônio, as vistorias, as fotos e os relatórios. Nada se perde entre pastas, planilhas e mensagens.
 - **Acompanhamento em tempo real:** o painel mostra o que já foi feito, o que falta e as divergências (não localizados, veículos fora da lista, avarias, itens de segurança ausentes...).
-- **Relatórios prontos e verificáveis:** o PDF de cada veículo é gerado ao concluir a vistoria, e os relatórios gerais têm número de controle e código de autenticidade.
+- **Relatórios prontos e verificáveis:** o PDF de cada veículo é gerado ao concluir a vistoria, e todos os relatórios têm número de controle e código de autenticidade.
 - **Funciona no pátio:** o notebook faz o papel de servidor (sem internet) e o celular continua vistoriando mesmo fora do alcance do hotspot, enviando tudo quando a conexão volta.
 
 ## Principais funções
@@ -18,13 +18,24 @@ A vistoria visual da frota envolve muitos veículos, muitas fotos e muita confer
 | Painel (notebook) | Aplicativo de vistoria (celular) |
 |---|---|
 | Importa a planilha do patrimônio (CSV ou Excel) | Lista de veículos com busca e filtros |
-| Cartões, progresso geral e andamento por secretaria | Situação aparente, odômetro, local, motorista |
+| Cartões, progresso geral e andamento por secretaria | Situação, categoria, estado do veículo, odômetro, local, motorista |
 | Pendências, divergências e alertas por veículo | Itens de segurança (estepe, triângulo, macaco, chave) |
 | Mapa das vistorias (GPS) | Roteiro de fotos com 11 etapas, revisão e conclusão |
 | Relatórios PDF: por veículo, geral, por secretaria e pendências | Cadastro de veículo encontrado fora da lista |
 | Verificação de autenticidade dos relatórios | GPS em cada foto |
 | Usuários com perfis (administrador e vistoriador) | Modo offline com envio automático |
 | Exportação em CSV | Instalável na tela inicial (PWA) |
+
+## O que é registrado na vistoria
+
+- **Situação aparente:** em uso, parado, em oficina, inservível/sucata ou não localizado (neste caso não são pedidas fotos).
+- **Categoria:** veículo ou máquina. Para máquinas, pergunta se há placa patrimonial colada.
+- **Estado:** plotagem, placa legível, para-brisa quebrado e faróis/lanternas (se houver defeito, a descrição é obrigatória).
+- **Uso:** odômetro/horímetro, local onde está, onde é utilizado, nome do motorista/operador e observações.
+- **Itens de segurança:** estepe, triângulo, macaco e chave de roda (ou "não se aplica").
+- **Fotos:** frente, traseira, laterais, placa/plaqueta, chassi, painel, interior, pneus, avarias e motor.
+
+Essas informações aparecem no painel, no relatório PDF e na exportação em CSV.
 
 ## Como funciona
 
@@ -40,11 +51,13 @@ O notebook roda um servidor local feito em Python e cria o próprio certificado 
 
 - Notebook com Windows e **Python 3** instalado (marque *Add Python to PATH* na instalação).
 - Celular Android ou iPhone com navegador.
-- Internet apenas na instalação.
+- Internet na instalação. No uso diário, só o fundo do mapa precisa dela.
 
 ## Instalação (uma única vez, com internet)
 
-Dois cliques em **`instalar.bat`**. Ele instala as bibliotecas (PDF, QR Code, certificado) e cria o certificado local.
+Dois cliques em **`instalar.bat`**. Ele instala as bibliotecas (PDF, QR Code, certificado, Excel e fotos HEIC), baixa os ícones (Font Awesome) e cria o certificado local.
+
+Se o download dos ícones falhar, conecte o notebook à internet e rode `python servidor.py --preparar`.
 
 ## Uso diário
 
@@ -89,8 +102,8 @@ Isso tira o aviso de "conexão não segura" e libera o GPS e o modo offline.
 | `dados\relatorios\` | relatórios em PDF |
 | `dados\frota.db` | banco de dados (inclui usuários e números de controle) |
 | `dados\certificado\` | certificados (**não** compartilhe `ca-chave.pem` nem `chave.pem`) |
-| `dados\backups\` | cópias feitas pelo botão *Zerar banco* |
-| `dados\excluidos\` | fotos de veículos excluídos |
+| `dados\backups\` | cópias do banco feitas pelo botão *Zerar banco* |
+| `dados\excluidos\` | fotos excluídas (e fotos e PDFs guardados ao zerar o banco) |
 
 > **Faça backup copiando a pasta `dados` todos os dias.**
 
@@ -111,6 +124,7 @@ frota_caratinga/
 ├── instalar.bat         instalação única
 ├── iniciar.bat          abre o sistema
 ├── README.md
+├── LEIA-ME.txt          guia rápido de instalação e uso
 ├── web/
 │   ├── painel.html      painel do notebook
 │   ├── celular.html     aplicativo de vistoria
@@ -118,12 +132,13 @@ frota_caratinga/
 │   ├── comum.js         funções comuns (login, comunicação com o servidor)
 │   ├── estilo.css       aparência
 │   ├── sw.js            service worker (modo offline)
+│   ├── fa/              ícones Font Awesome (baixados na instalação)
 │   └── manifest.webmanifest, brasao.png, icon-192.png, icon-512.png
 └── dados/               criada no primeiro uso (banco, fotos, relatórios, certificados)
 ```
 
 ## Tecnologias
 
-- **Python** (biblioteca padrão: `http.server`, `sqlite3`), **reportlab** (PDF), **Pillow** (miniaturas), **segno** (QR Code), **cryptography** (certificado local), **openpyxl** (Excel).
+- **Python** (biblioteca padrão: `http.server`, `sqlite3`), **reportlab** (PDF), **Pillow** (miniaturas), **segno** (QR Code), **cryptography** (certificado local), **openpyxl** (Excel), **pillow-heif** (fotos HEIC).
 - **HTML, CSS e JavaScript** puros, sem frameworks. IndexedDB e service worker para o modo offline.
 - Mapa com fundo do **OpenStreetMap**.
